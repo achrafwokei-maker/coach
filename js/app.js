@@ -1,6 +1,7 @@
 import * as db from './db.js';
 import { exportAll, importFile, shareJSON } from './backup.js';
 import { ymd, addDays, daysBetween, weekStart, fmtShort, fmtLong, fmtMonthYear, addMonths, uid, esc, r1, norm, byDate, dayName, clamp } from './util.js';
+const big = (n) => Math.round(n).toLocaleString('en-US');
 import { DEFAULT_PROGRAM, cloneProgram, allExercises, EQUIP } from './program.js';
 import { FOODS, MEAL_TEMPLATES } from './foods.js';
 import {
@@ -17,7 +18,7 @@ const sheetEl = $('#sheet');
 
 /* ───────────────────────── State ───────────────────────── */
 const DEFAULT_TARGETS = { kcal: 2400, protein: 150, carbs: 270, fat: 75, creatine: 5 };
-const DEFAULT_SETTINGS = { restTimer: true, checkInterval: 7, theme: 'system' };
+const DEFAULT_SETTINGS = { restTimer: true, checkInterval: 7, theme: 'dark' };
 const S = {
   profile: null, targets: null, program: null, settings: null, state: null,
   workouts: [], food: [], body: [], photos: [], customFoods: [], meals: [], days: {}, active: null,
@@ -150,60 +151,73 @@ function viewToday() {
   const next = goal.milestones.find((m) => !m.reached);
   const day0 = S.program.days[plan.dayId || plan.next];
   const nextDate = nextTrainingDate();
+  const [wdName, ...dRest] = fmtLong(today()).split(' ');
+  const sessionNo = finishedWorkouts(S.workouts).length + 1;
 
-  let workoutCard;
+  let hero;
   if (S.active) {
-    workoutCard = `<div class="card workout live"><div class="eyebrow">In progress</div><h2>${esc(dayLabel(S.active.dayId))}</h2>
-      <p class="muted">${S.active.exercises.filter((e) => e.sets.some((s) => s.done)).length}/${S.active.exercises.length} exercises started</p>
-      <button class="btn primary block" data-act="resume-workout">Resume workout</button></div>`;
+    const done = S.active.exercises.filter((e) => e.sets.some((s) => s.done)).length;
+    hero = `<section class="hero-card volt">
+      <div class="hero-meta"><span><i class="pulse"></i>In progress</span><span>${done}/${S.active.exercises.length} exercises</span></div>
+      <div class="hero-title">${esc(dayLabel(S.active.dayId))}</div>
+      <button class="btn black lg block" data-act="resume-workout">Resume workout ${icon('chev')}</button></section>`;
   } else if (plan.type === 'train') {
-    workoutCard = `<div class="card workout"><div class="eyebrow">${plan.reason === 'catch-up' ? 'Catch-up session' : 'Today’s workout'}${ctx.calibrating ? ' · calibration' : ''}</div>
-      <h2>${esc(day0.name)}</h2>
-      <p class="muted">${day0.exercises.length} exercises · ${esc(day0.warmup[0])}</p>
-      <button class="btn primary block lg" data-act="start-workout" data-day="${plan.dayId}">Start workout</button></div>`;
+    hero = `<section class="hero-card volt">
+      <div class="hero-meta"><span>${plan.reason === 'catch-up' ? 'Catch-up session' : `Session ${sessionNo}`}</span><span>${ctx.calibrating ? 'Calibration week' : `${day0.exercises.length} exercises`}</span></div>
+      <div class="hero-title">${esc(day0.name)}</div>
+      <div class="hero-sub">${esc(day0.warmup[0])} → ${esc(day0.finisher)}</div>
+      <button class="btn black lg block" data-act="start-workout" data-day="${plan.dayId}">Start workout ${icon('chev')}</button></section>`;
   } else if (plan.type === 'done') {
     const w = plan.workout;
-    const mins = w.end && w.t ? Math.round((w.end - w.t) / 60000) : null;
+    const mins = w.end && w.t ? Math.round((w.end - w.t) / 60000) : 0;
+    const sets = w.exercises.reduce((a, e) => a + e.sets.filter((s) => s.done).length, 0);
     const prs = prsInWorkout(S.workouts, w);
-    workoutCard = `<div class="card workout done"><div class="eyebrow">Completed</div><h2>${esc(dayLabel(w.dayId))} ${icon('check', 'ok')}</h2>
-      <p class="muted">${mins ? `${mins} min · ` : ''}${prs.length ? `${prs.length} personal record${prs.length > 1 ? 's' : ''}` : 'Logged'} · Next: ${esc(dayLabel(plan.next))}</p></div>`;
+    hero = `<section class="hero-card outline">
+      <div class="hero-meta"><span>${icon('check')} Completed</span><span>Next · ${esc(dayLabel(plan.next))}</span></div>
+      <div class="hero-title">${esc(dayLabel(w.dayId))}</div>
+      <div class="hero-stats"><div><b>${mins}</b><span>min</span></div><div><b>${sets}</b><span>sets</span></div><div><b>${prs.length}</b><span>records</span></div></div></section>`;
   } else {
-    workoutCard = `<div class="card workout rest"><div class="eyebrow">Rest day</div><h2>Recover</h2>
-      <p class="muted">Next: <b>${esc(dayLabel(plan.next))}</b>${nextDate ? ` · ${fmtLong(nextDate).split(' ')[0]}` : ''}</p>
-      <button class="btn ghost block" data-act="start-workout" data-day="${plan.next}">Train anyway</button></div>`;
+    hero = `<section class="hero-card dark">
+      <div class="hero-meta"><span>Rest day</span><span>Next · ${esc(dayLabel(plan.next))}${nextDate ? ` · ${fmtLong(nextDate).split(' ')[0].slice(0, 3)}` : ''}</span></div>
+      <div class="hero-title ghost-text">Recover</div>
+      <div class="hero-sub">Muscle is built between sessions. Eat to target, sleep 7–9 h.</div>
+      <button class="btn ghost block" data-act="start-workout" data-day="${plan.next}">Train anyway</button></section>`;
   }
 
-  const macro = (k, label, val, target, unit) => {
-    const left = r1(target - val);
-    return `<div class="macro"><div class="macro-top"><span>${label}</span><b>${Math.round(val)}<small>/${target}${unit}</small></b></div>${bar(val, target, k)}<div class="macro-left ${left < 0 ? 'neg' : ''}">${left >= 0 ? `${Math.round(left)}${unit} left` : `${Math.round(-left)}${unit} over`}</div></div>`;
+  const pct = Math.min(100, (tot.k / T.kcal) * 100);
+  const macro = (k, label, val, target) => {
+    const left = Math.round(target - val);
+    return `<div class="mcol ${k}"><span class="lbl">${label}</span><b class="num">${Math.abs(left)}<small>g</small></b>
+      <span class="sub ${left < 0 ? 'neg' : ''}">${left >= 0 ? 'left' : 'over'} · ${Math.round(val)}/${target}</span>${bar(val, target, k)}</div>`;
   };
 
-  return `<header class="top"><div><div class="date">${fmtLong(today())}</div><h1>Today</h1></div>
+  return `<header class="top"><div><div class="date">${wdName}</div><h1 class="display">${dRest.join(' ')}</h1></div>
       <button class="icon-btn" data-act="open-settings" aria-label="Settings">${icon('gear')}</button></header>
-    ${!standalone && /iphone/i.test(navigator.userAgent) ? `<div class="card hint small">Tip: install via Share → <b>Add to Home Screen</b> for offline use and full-screen.</div>` : ''}
-    <div class="coach-line" data-act="open-coach">${icon('spark')}<p>${esc(msg)}</p>${icon('chev', 'dim')}</div>
-    ${workoutCard}
-    <div class="card nutrition">
-      <div class="nut-head">${ring(tot.k, T.kcal, 128, 11, `${Math.max(0, rem.k)}`, rem.k >= 0 ? 'kcal left' : `${-rem.k} over`)}
-        <div class="macros">${macro('p', 'Protein', tot.p, T.protein, 'g')}${macro('c', 'Carbs', tot.c, T.carbs, 'g')}${macro('f', 'Fat', tot.f, T.fat, 'g')}</div></div>
-      <button class="btn primary block" data-act="add-meal">${icon('plus')} Add meal</button>
+    ${!standalone && /iphone/i.test(navigator.userAgent) ? `<div class="card hint small">Install: Share → <b>Add to Home Screen</b>, then open Coach from there.</div>` : ''}
+    <button class="coach-line" data-act="open-coach"><span class="coach-tag">Coach</span><p>${esc(msg)}</p>${icon('chev', 'dim')}</button>
+    ${hero}
+    <section class="card fuel">
+      <div class="section-head"><span class="eyebrow">Fuel</span><span class="muted small">${big(tot.k)} / ${big(T.kcal)} kcal</span></div>
+      <div class="kcal-big"><b class="num xl ${rem.k < 0 ? 'neg' : ''}">${big(Math.abs(rem.k))}</b><span>kcal<br>${rem.k >= 0 ? 'left' : 'over'}</span></div>
+      <div class="bar thick"><i style="width:${pct}%"></i></div>
+      <div class="mcols">${macro('p', 'Protein', tot.p, T.protein)}${macro('c', 'Carbs', tot.c, T.carbs)}${macro('f', 'Fat', tot.f, T.fat)}</div>
+      <button class="btn primary lg block" data-act="add-meal">${icon('plus')} Add meal</button>
       ${foodToday.length ? `<ul class="entries">${foodToday.map((e) => `<li data-act="edit-meal" data-id="${e.id}">
-          ${e.photo ? `<img class="thumb-sm" data-photo="${e.photo.id}" alt="">` : `<span class="dot-ic">${icon('today')}</span>`}
-          <div><b>${esc(e.name || e.meal)}</b><span>${esc(e.items.map((i) => i.n).join(', '))}</span></div><em>${totals([e]).k}<small> kcal</small></em></li>`).join('')}</ul>` : ''}
-      ${sugg.length ? `<div class="suggest"><div class="eyebrow">What to eat next</div>${sugg.map((s, i) => `<button class="sugg" data-act="log-suggestion" data-i="${i}">
-          <div><b>${esc(s.name)}</b><span>${s.items.map((it) => `${it.g} g ${it.n.split(',')[0].split('(')[0].trim().toLowerCase()}`).join(' · ')}</span></div>
-          <em>${s.tot.k} kcal<br><small>${Math.round(s.tot.p)} g P</small></em></button>`).join('')}</div>` : ''}
-    </div>
+          ${e.photo ? `<img class="thumb-sm" data-photo="${e.photo.id}" alt="">` : `<i class="dot-ic">${esc((e.meal || 'M')[0])}</i>`}
+          <div><b>${esc(e.name || e.meal)}</b><span>${esc(e.items.map((i) => i.n).join(', '))}</span></div><em>${totals([e]).k}<small>kcal</small></em></li>`).join('')}</ul>` : ''}
+    </section>
+    ${sugg.length ? `<section class="next-eat"><div class="eyebrow">Eat next</div>${sugg.map((s, i) => `<button class="sugg" data-act="log-suggestion" data-i="${i}">
+        <div><b>${esc(s.name)}</b><span>${s.items.map((it) => `${it.g}g ${it.n.split(',')[0].split('(')[0].trim().toLowerCase()}`).join(' · ')}</span></div>
+        <em><b>${s.tot.k}</b>kcal · ${Math.round(s.tot.p)}g P</em>${icon('plus', 'add')}</button>`).join('')}</section>` : ''}
     <div class="row-cards">
-      <button class="card tick ${day.creatine ? 'on' : ''}" data-act="toggle-creatine"><span class="tickbox">${icon('check')}</span><div><b>Creatine</b><span>${S.profile.creatine || 5} g today</span></div></button>
-      <button class="card goal-mini" data-act="tab" data-tab="progress"><div class="eyebrow">Goal</div><b>${r1(goal.current)} <small>→ ${goal.target} kg</small></b>${bar(goal.progress, 1, 'goal')}<span>${next ? `Next: ${next.kg} kg` : 'Goal reached'}</span></button>
+      <button class="card tick ${day.creatine ? 'on' : ''}" data-act="toggle-creatine"><span class="tickbox">${icon('check')}</span><div><b>Creatine</b><span>${day.creatine ? 'Taken' : `${S.profile.creatine || 5} g today`}</span></div></button>
+      <button class="card goal-mini" data-act="tab" data-tab="progress"><span class="eyebrow">Goal</span><b class="num">${r1(goal.current)}<small> → ${goal.target}</small></b>${bar(goal.progress, 1, 'goal')}<span>${next ? `Next ${next.kg} kg` : 'Reached'}</span></button>
     </div>
-    ${due ? `<button class="card due" data-act="open-checkin">${icon('camera')}<div><b>${due}</b><span>Weight${S.settings.checkInterval ? ', photos' : ''} and optional measurements · 1 minute</span></div>${icon('chev', 'dim')}</button>` : ''}
-    <div class="card checkin"><div class="eyebrow">Recovery check-in <span class="muted">· optional</span></div>
-      <div class="chips-row"><span>Sleep</span>${[5, 6, 7, 8, 9].map((h) => `<button class="chip ${day.sleep === h ? 'on' : ''}" data-act="set-sleep" data-v="${h}">${h}${h === 9 ? '+' : ''}h</button>`).join('')}</div>
+    ${due ? `<button class="card due" data-act="open-checkin">${icon('camera')}<div><b>${due}</b><span>Weight, photos, optional measurements · 1 min</span></div>${icon('chev', 'dim')}</button>` : ''}
+    <section class="card checkin"><div class="section-head"><span class="eyebrow">Recovery</span><button class="link" data-act="quick-weight">${icon('plus')} Weight</button></div>
+      <div class="chips-row"><span>Sleep</span>${[5, 6, 7, 8, 9].map((h) => `<button class="chip ${day.sleep === h ? 'on' : ''}" data-act="set-sleep" data-v="${h}">${h}${h === 9 ? '+' : ''}</button>`).join('')}</div>
       <div class="chips-row"><span>Energy</span>${[['Low', 1], ['OK', 2], ['High', 3]].map(([l, v]) => `<button class="chip ${day.energy === v ? 'on' : ''}" data-act="set-energy" data-v="${v}">${l}</button>`).join('')}</div>
-      <button class="link" data-act="quick-weight">${icon('plus')} Log today’s weight</button>
-    </div>
+    </section>
     <div class="spacer"></div>`;
 }
 
@@ -238,10 +252,10 @@ function viewTraining() {
   const perWeek = weeks.map((w) => ({ label: fmtShort(w).split(' ')[0], v: fin.filter((x) => x.date >= w && x.date <= addDays(w, 6)).length }));
   const tracked = Object.values(map).filter((e) => exerciseHistory(S.workouts, e.id).length);
 
-  return `<header class="top"><div><div class="date">${plan.type === 'train' ? 'Today' : 'Next session'}</div><h1>Training</h1></div>
+  return `<header class="top"><div><div class="date">${plan.type === 'train' ? 'Today' : 'Next session'}</div><h1 class="display">Training</h1></div>
       <button class="icon-btn" data-act="open-program" aria-label="Edit programme">${icon('edit')}</button></header>
     <div class="card">
-      <div class="row-between"><div><div class="eyebrow">${plan.type === 'train' ? 'Today' : plan.type === 'done' ? 'Done today · next up' : 'Next up'}</div><h2>${esc(day.name)}</h2></div>
+      <div class="row-between"><div><div class="eyebrow">${plan.type === 'train' ? 'Today' : plan.type === 'done' ? 'Done today · next up' : 'Next up'}</div><h2 class="day-big">${esc(day.name)}</h2></div>
       <button class="btn primary" data-act="${S.active ? 'resume-workout' : 'start-workout'}" data-day="${dayId}">${S.active ? 'Resume' : 'Start'}</button></div>
       <p class="muted small">Warm-up: ${day.warmup.map(esc).join(' · ')}</p>
       <ul class="ex-list">${day.exercises.map((e) => {
@@ -300,11 +314,18 @@ function viewWorkout() {
   const day = S.program.days[w.dayId] || { name: w.dayId, warmup: [], finisher: '' };
   const map = exMap();
   const timer = UI.timer;
-  return `<div class="sheet-head"><button class="icon-btn" data-act="close-sheet" aria-label="Minimise">${icon('down')}</button>
-      <div class="center"><b>${esc(day.name)}</b><span id="elapsed">${elapsed(w.t)}</span></div>
+  const live = w.exercises.filter((e) => !e.skipped);
+  const setsDone = live.reduce((a, e) => a + e.sets.filter((s) => s.done).length, 0);
+  const setsAll = live.reduce((a, e) => a + e.sets.length, 0) || 1;
+  const exDone = live.filter((e) => e.sets.length && e.sets.every((s) => s.done)).length;
+  const fmtRep = (r) => (r[0] === r[1] ? r[0] : r.join('–'));
+  return `<div class="sheet-head wk-head"><button class="icon-btn" data-act="close-sheet" aria-label="Minimise">${icon('down')}</button>
+      <div class="center"><b class="display-sm">${esc(day.name)}</b><span id="elapsed" class="num">${elapsed(w.t)}</span></div>
       <button class="btn primary sm" data-act="finish-workout">Finish</button></div>
-    <div class="sheet-body">
-      <div class="warm"><span class="eyebrow">Warm-up</span> ${day.warmup.map(esc).join(' · ')}</div>
+    <div class="wk-progress"><i style="width:${(setsDone / setsAll) * 100}%"></i></div>
+    <div class="sheet-body wk-body">
+      <div class="wk-stats"><span><b>${exDone}</b>/${live.length} exercises</span><span><b>${setsDone}</b>/${setsAll} sets</span></div>
+      <div class="warm"><span class="eyebrow">Warm-up</span>${day.warmup.map(esc).join(' · ')}</div>
       ${w.exercises.map((e, i) => {
         const ex = map[e.exId] || { sets: [2, 3], reps: [10, 12], equip: e.equip, rest: 90 };
         const rec = e.rec || {};
@@ -314,31 +335,39 @@ function viewWorkout() {
         const bw = ex.equip === 'bodyweight';
         const allDone = e.sets.length && e.sets.every((s) => s.done);
         return `<section class="wx ${e.skipped ? 'skipped' : ''} ${allDone ? 'complete' : ''}" id="wx-${i}">
-          <div class="wx-head"><div><h3>${esc(e.name)}</h3><span class="muted small">${ex.sets[0]}–${ex.sets[1]} sets × ${ex.reps[0] === ex.reps[1] ? ex.reps[0] : ex.reps.join('–')} reps${bw ? '' : ` · ${unit}`}${ex.note ? ` · ${esc(ex.note)}` : ''}</span></div>
-            <em class="pill ${st.cls}">${icon(st.icon)}${rec.weight != null ? `${rec.weight} kg` : st.label}</em></div>
-          <p class="why">${esc(rec.why || '')}</p>
-          ${last ? `<p class="last">Last (${fmtShort(last.date)}): ${last.sets.map((s) => `${bw ? '' : `${s.w}×`}${s.r}`).join(' · ')}${last.diff ? ` · ${DIFFICULTY[last.diff].label}` : ''}</p>` : ''}
-          ${e.skipped ? `<button class="link" data-act="unskip" data-i="${i}">Skipped — tap to restore</button>` : `
+          <div class="wx-top"><span class="wx-num">${String(i + 1).padStart(2, '0')}</span>
+            <div class="wx-title"><h3>${esc(e.name)}</h3>
+              <div class="wx-tags"><span>${ex.sets[0]}–${ex.sets[1]} × ${fmtRep(ex.reps)}</span><span>${icon('timer')}${fmtSec(ex.rest || 90)}</span>${bw ? '' : `<span>${esc(unit)}</span>`}</div></div>
+            ${allDone ? `<span class="wx-check">${icon('check')}</span>` : ''}</div>
+          ${ex.note ? `<p class="muted tiny">${esc(ex.note)}</p>` : ''}
+          <div class="target ${st.cls}">
+            <div class="target-main"><span class="t-lbl">${icon(st.icon)}${st.label}</span>
+              <b class="num">${rec.weight != null ? `${rec.weight}<small>kg</small>` : bw ? `${rec.reps || ex.reps[1]}<small>reps</small>` : '—'}</b></div>
+            <p>${esc(rec.why || '')}</p></div>
+          ${last ? `<p class="last"><span>Last · ${fmtShort(last.date)}</span>${last.sets.map((s) => `<b>${bw ? '' : `${s.w}×`}${s.r}</b>`).join('')}${last.diff ? `<em>${DIFFICULTY[last.diff].label}</em>` : ''}</p>` : ''}
+          ${e.skipped ? `<button class="btn ghost block" data-act="unskip" data-i="${i}">Skipped — restore</button>` : `
           <div class="sets"><div class="set-h"><span>Set</span><span>${bw ? '' : 'kg'}</span><span>Reps</span><span></span></div>
           ${e.sets.map((s, j) => `<div class="set ${s.done ? 'done' : ''}"><span class="n">${j + 1}</span>
             ${bw ? '<span></span>' : `<input inputmode="decimal" value="${s.w}" data-in="set-w" data-i="${i}" data-j="${j}" aria-label="Weight set ${j + 1}">`}
             <input inputmode="numeric" value="${s.r}" data-in="set-r" data-i="${i}" data-j="${j}" aria-label="Reps set ${j + 1}">
             <button class="tick-btn" data-act="toggle-set" data-i="${i}" data-j="${j}" aria-label="Complete set">${icon('check')}</button></div>`).join('')}</div>
-          <div class="wx-actions"><button class="link" data-act="add-set" data-i="${i}">${icon('plus')} Set</button>
-            ${e.sets.length > 1 ? `<button class="link" data-act="remove-set" data-i="${i}">${icon('minus')} Set</button>` : ''}
-            <button class="link" data-act="skip" data-i="${i}">Skip</button>
-            <button class="link ${e.pain ? 'danger' : ''}" data-act="toggle-pain" data-i="${i}">${e.pain ? 'Pain flagged' : 'Pain?'}</button></div>
-          <div class="diff"><span class="muted small">How did it feel?</span><div class="seg">${Object.entries(DIFFICULTY).map(([k, d]) => `<button class="${e.diff === k ? 'on' : ''} d-${k}" data-act="set-diff" data-i="${i}" data-v="${k}">${d.label}</button>`).join('')}</div>
-            ${e.diff ? `<span class="muted small">≈ ${DIFFICULTY[e.diff].rir}</span>` : ''}</div>
+          <div class="wx-actions"><button data-act="add-set" data-i="${i}">${icon('plus')} Set</button>
+            ${e.sets.length > 1 ? `<button data-act="remove-set" data-i="${i}">${icon('minus')} Set</button>` : ''}
+            <button data-act="skip" data-i="${i}">Skip</button>
+            <button class="${e.pain ? 'danger' : ''}" data-act="toggle-pain" data-i="${i}">${e.pain ? 'Pain flagged' : 'Pain'}</button></div>
+          <div class="diff"><div class="diff-h"><span class="eyebrow">How did it feel?</span>${e.diff ? `<span class="muted tiny">≈ ${DIFFICULTY[e.diff].rir}</span>` : ''}</div>
+            <div class="seg">${Object.entries(DIFFICULTY).map(([k, d]) => `<button class="${e.diff === k ? 'on' : ''} d-${k}" data-act="set-diff" data-i="${i}" data-v="${k}">${d.label}</button>`).join('')}</div></div>
           ${e.pain ? '<p class="warn small">Stop the set if it hurts. Reduce load, shorten the range of motion, or swap the exercise. Pain that persists needs a professional’s opinion.</p>' : ''}`}
         </section>`;
       }).join('')}
-      <div class="warm"><span class="eyebrow">Finish</span> ${esc(day.finisher)}</div>
+      <div class="warm"><span class="eyebrow">Finish</span>${esc(day.finisher)}</div>
+      <button class="btn primary lg block" data-act="finish-workout">Finish workout</button>
       <button class="btn ghost block danger-text" data-act="discard-workout">Discard workout</button>
-      <div class="spacer"></div>
+      <div class="spacer" style="height:${timer ? 110 : 24}px"></div>
     </div>
-    ${timer ? `<div class="rest-bar" id="rest-bar"><span>${icon('timer')} Rest</span><b id="rest-left">${fmtSec(Math.max(0, Math.round((timer.end - Date.now()) / 1000)))}</b>
-      <button class="chip" data-act="rest-add">+15s</button><button class="chip" data-act="rest-skip">Skip</button></div>` : ''}`;
+    ${timer ? `<div class="rest-bar" id="rest-bar"><i id="rest-fill" style="width:${Math.max(0, Math.min(100, ((timer.end - Date.now()) / (timer.total || 90000)) * 100))}%"></i>
+      <div class="rest-in"><span class="eyebrow">Rest</span><b id="rest-left" class="num">${fmtSec(Math.max(0, Math.round((timer.end - Date.now()) / 1000)))}</b>
+      <button class="chip" data-act="rest-add">+15s</button><button class="chip" data-act="rest-skip">Skip</button></div></div>` : ''}`;
 }
 
 const fmtSec = (s) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
@@ -346,7 +375,7 @@ const elapsed = (t) => { const s = Math.max(0, Math.round((Date.now() - t) / 100
 
 function startRest(seconds) {
   if (!S.settings.restTimer) return;
-  UI.timer = { end: Date.now() + seconds * 1000, beeped: false };
+  UI.timer = { end: Date.now() + seconds * 1000, total: seconds * 1000, beeped: false };
 }
 let audioCtx;
 function beep() {
@@ -365,6 +394,8 @@ setInterval(() => {
     const left = Math.round((UI.timer.end - Date.now()) / 1000);
     const rl = document.getElementById('rest-left');
     if (rl) rl.textContent = fmtSec(Math.max(0, left));
+    const rf = document.getElementById('rest-fill');
+    if (rf) rf.style.width = `${Math.max(0, Math.min(100, ((UI.timer.end - Date.now()) / (UI.timer.total || 90000)) * 100))}%`;
     if (left <= 0 && !UI.timer.beeped) { UI.timer.beeped = true; beep(); $('#rest-bar')?.classList.add('done'); }
     if (left < -20) { UI.timer = null; if (UI.sheet?.kind === 'workout') renderSheet(); }
   }
@@ -437,19 +468,20 @@ function recentFoods() {
 
 function viewMeal() {
   const d = UI.mealDraft;
-  return `<div class="sheet-head"><button class="icon-btn" data-act="close-sheet">${icon('x')}</button>
+  const tot = totals([{ items: d.items }]);
+  return `<div class="sheet-head"><button class="icon-btn" data-act="close-sheet" aria-label="Close">${icon('x')}</button>
       <div class="center"><select class="meal-select" data-in="meal-type">${['Breakfast', 'Lunch', 'Snack', 'Dinner', 'Pre-workout', 'Post-workout'].map((m) => `<option ${m === d.meal ? 'selected' : ''}>${m}</option>`).join('')}</select></div>
-      <button class="btn primary sm" data-act="save-meal" ${d.items.length ? '' : 'disabled'}>Save</button></div>
-    <div class="sheet-body">
-      <div class="search-row"><input id="meal-q" class="big-input" placeholder="Type or dictate: “3 eggs, 200 g rice”" value="${esc(d.q)}" data-in="meal-q" autocomplete="off" autocorrect="off" enterkeyhint="done">
-        <label class="icon-btn cam" aria-label="Add photo">${icon('camera')}<input type="file" accept="image/*" data-in="meal-photo" hidden></label></div>
-      <p class="muted tiny">Tip: tap the microphone on the iPhone keyboard to dictate. Quantities like “2 eggs”, “150 g chicken”, “a bowl of chorba” are understood.</p>
-      <div id="meal-results">${mealResults()}</div></div>`;
+      <label class="icon-btn cam" aria-label="Add photo">${icon('camera')}<input type="file" accept="image/*" data-in="meal-photo" hidden></label></div>
+    <div class="sheet-body meal-body">
+      <div class="search-row">${icon('spark', 'search-ic')}<input id="meal-q" class="big-input" placeholder="“3 eggs, 200 g rice…”" value="${esc(d.q)}" data-in="meal-q" autocomplete="off" autocorrect="off" enterkeyhint="done"></div>
+      <p class="muted tiny hint-line">Type or tap 🎤 on the keyboard to dictate — English or French.</p>
+      <div id="meal-results">${mealResults()}</div></div>
+    <div class="meal-foot"><div class="mf-tot"><b class="num">${tot.k}</b><span>kcal</span><em>P ${Math.round(tot.p)} · C ${Math.round(tot.c)} · F ${Math.round(tot.f)}</em></div>
+      <button class="btn primary lg" data-act="save-meal" ${d.items.length ? '' : 'disabled'}>Save${d.items.length ? ` · ${d.items.length}` : ''}</button></div>`;
 }
 
 function mealResults() {
   const d = UI.mealDraft;
-  const tot = totals([{ items: d.items }]);
   const q = d.q.trim();
   const parsed = q ? parseFoodText(q, allFoods()) : { items: [], unknown: [] };
   const nq = norm(q);
@@ -457,33 +489,33 @@ function mealResults() {
   const recent = recentFoods();
   const prevMeals = S.food.filter((e) => e.date !== today()).slice(-30).reverse().filter((e, i, arr) => arr.findIndex((x) => x.items.map((y) => y.fid).join() === e.items.map((y) => y.fid).join()) === i).slice(0, 5);
   const foodById = (id) => allFoods().find((f) => f.id === id);
-  return `${d.photo ? `<div class="meal-photo"><img data-photo="${d.photo.id}" alt=""><p class="muted small">Photo saved with this meal. Choose the foods below — a photo alone can’t give exact nutrition values.</p></div>` : ''}
-      ${parsed.items.length ? `<div class="group"><div class="eyebrow">Recognised</div>${parsed.items.map((p, i) => `<button class="food-row add" data-act="add-parsed" data-i="${i}"><div><b>${esc(p.food.n)}</b><span>${p.grams} ${p.food.ml ? 'ml' : 'g'} · ${itemFrom(p.food, p.grams).k} kcal · ${itemFrom(p.food, p.grams).p} g P${p.food.est ? ' · estimate' : ''}</span></div>${icon('plus')}</button>`).join('')}
-        ${parsed.items.length > 1 ? `<button class="btn ghost block sm" data-act="add-all-parsed">Add all ${parsed.items.length}</button>` : ''}</div>` : ''}
-      ${parsed.unknown.length ? `<p class="muted small">Not recognised: ${parsed.unknown.map(esc).join(', ')} — <button class="link inline" data-act="custom-food" data-name="${esc(parsed.unknown[0])}">create a custom food</button></p>` : ''}
-      ${search.length ? `<div class="group"><div class="eyebrow">Foods</div>${search.map((f) => `<button class="food-row add" data-act="add-food" data-id="${f.id}"><div><b>${esc(f.n)}</b><span>${f.k} kcal · ${f.p} P · ${f.c} C · ${f.f} F per 100 ${f.ml ? 'ml' : 'g'}${f.est ? ' · estimate' : ''}</span></div>${icon('plus')}</button>`).join('')}</div>` : ''}
-
-      ${d.items.length ? `<div class="group selected"><div class="eyebrow">This meal · ${tot.k} kcal · ${tot.p} P · ${tot.c} C · ${tot.f} F</div>
-        ${d.items.map((it, i) => { const f = foodById(it.fid); return `<div class="sel-item"><div class="sel-top"><b>${esc(it.n)}</b><button class="icon-btn sm" data-act="remove-item" data-i="${i}">${icon('x')}</button></div>
-          <div class="qty"><button class="icon-btn sm" data-act="qty" data-i="${i}" data-v="-1">${icon('minus')}</button>
-            <input inputmode="decimal" value="${it.g}" data-in="item-g" data-i="${i}"><span>${f?.ml ? 'ml' : 'g'}</span>
-            <button class="icon-btn sm" data-act="qty" data-i="${i}" data-v="1">${icon('plus')}</button>
-            <span class="macro-mini">${it.k} kcal · ${it.p} P</span></div>
-          ${f ? `<div class="chips">${(f.u || []).map(([l, g]) => `<button class="chip" data-act="portion" data-i="${i}" data-g="${g}">${esc(l)} ${g}</button>`).join('')}${(f.u || []).slice(0, 1).map(([l, g]) => `<button class="chip" data-act="portion" data-i="${i}" data-g="${g * 2}">2 × ${esc(l)}</button>`).join('')}
-            ${f.pair ? `<button class="chip alt" data-act="swap-pair" data-i="${i}">${f.raw ? 'Use cooked weight' : 'Weighed raw?'}</button>` : ''}</div>` : ''}</div>`; }).join('')}
+  const short = (f) => esc(f.n.split(' (')[0].split(',')[0]);
+  const unitOf = (f) => (f.ml ? 'ml' : 'g');
+  return `${d.photo ? `<div class="meal-photo"><img data-photo="${d.photo.id}" alt=""><p class="muted small">Photo saved with this meal. Pick the foods below — a photo alone can’t give exact nutrition values.</p></div>` : ''}
+      ${d.items.length ? `<div class="group plate"><div class="eyebrow">Your plate</div>
+        ${d.items.map((it, i) => { const f = foodById(it.fid); return `<div class="sel-item">
+          <div class="sel-top"><div><b>${esc(it.n)}</b><span class="muted tiny">${it.k} kcal · P ${it.p} · C ${it.c} · F ${it.f}${f?.est ? ' · estimate' : ''}</span></div><button class="icon-btn sm" data-act="remove-item" data-i="${i}" aria-label="Remove">${icon('x')}</button></div>
+          <div class="qty"><button class="step" data-act="qty" data-i="${i}" data-v="-1" aria-label="Less">${icon('minus')}</button>
+            <label class="qty-in"><input inputmode="decimal" value="${it.g}" data-in="item-g" data-i="${i}"><span>${f ? unitOf(f) : 'g'}</span></label>
+            <button class="step" data-act="qty" data-i="${i}" data-v="1" aria-label="More">${icon('plus')}</button></div>
+          ${f ? `<div class="chips sm">${(f.u || []).map(([l, g]) => `<button class="chip ${it.g === g ? 'on' : ''}" data-act="portion" data-i="${i}" data-g="${g}">${esc(l)}</button>`).join('')}${(f.u || []).slice(0, 1).map(([l, g]) => `<button class="chip ${it.g === g * 2 ? 'on' : ''}" data-act="portion" data-i="${i}" data-g="${g * 2}">2 × ${esc(l)}</button>`).join('')}
+            ${f.pair ? `<button class="chip alt" data-act="swap-pair" data-i="${i}">${f.raw ? 'Weighed cooked?' : 'Weighed raw?'}</button>` : ''}</div>` : ''}</div>`; }).join('')}
         <label class="switch-row"><input type="checkbox" data-in="meal-fav" ${d.fav ? 'checked' : ''}><span>Save as a favourite meal</span></label>
         ${d.fav ? `<input class="big-input" placeholder="Meal name (e.g. My breakfast)" value="${esc(d.name)}" data-in="meal-name">` : ''}
       </div>` : ''}
-
+      ${parsed.items.length ? `<div class="group"><div class="section-head"><span class="eyebrow">Recognised</span>${parsed.items.length > 1 ? `<button class="link" data-act="add-all-parsed">Add all ${parsed.items.length}</button>` : ''}</div>
+        ${parsed.items.map((p, i) => `<button class="food-row" data-act="add-parsed" data-i="${i}"><div><b>${esc(p.food.n)}</b><span>${p.grams} ${unitOf(p.food)} · ${itemFrom(p.food, p.grams).k} kcal · ${itemFrom(p.food, p.grams).p} g protein${p.food.est ? ' · estimate' : ''}</span></div><span class="add-btn">${icon('plus')}</span></button>`).join('')}</div>` : ''}
+      ${parsed.unknown.length ? `<p class="muted small">Not recognised: ${parsed.unknown.map(esc).join(', ')} — <button class="link inline" data-act="custom-food" data-name="${esc(parsed.unknown[0])}">create it</button></p>` : ''}
+      ${search.length ? `<div class="group"><div class="eyebrow">Foods</div>${search.map((f) => `<button class="food-row" data-act="add-food" data-id="${f.id}"><div><b>${esc(f.n)}</b><span>${f.k} kcal · P ${f.p} · C ${f.c} · F ${f.f} / 100 ${unitOf(f)}${f.est ? ' · estimate' : ''}</span></div><span class="add-btn">${icon('plus')}</span></button>`).join('')}</div>` : ''}
       ${!q ? `
-        ${S.meals.length ? `<div class="group"><div class="eyebrow">Favourite meals</div>${S.meals.map((m) => `<button class="food-row add" data-act="add-saved" data-id="${m.id}"><div><b>${esc(m.name)}</b><span>${totals([m]).k} kcal · ${totals([m]).p} g P</span></div>${icon('plus')}</button>`).join('')}</div>` : ''}
-        ${prevMeals.length ? `<div class="group"><div class="eyebrow">Repeat a previous meal</div>${prevMeals.map((m) => `<button class="food-row add" data-act="repeat-meal" data-id="${m.id}"><div><b>${esc(m.name || m.meal)} · ${fmtShort(m.date)}</b><span>${esc(m.items.map((i) => i.n).join(', '))}</span></div>${icon('repeat')}</button>`).join('')}</div>` : ''}
-        ${recent.length ? `<div class="group"><div class="eyebrow">Recent foods</div><div class="chips">${recent.map(({ f, g }) => `<button class="chip" data-act="add-food" data-id="${f.id}" data-g="${g}">${esc(f.n)}</button>`).join('')}</div></div>` : ''}
-        <div class="group"><div class="eyebrow">Quick picks</div><div class="chips">${['egg', 'chicken_cooked', 'rice_cooked', 'pasta_cooked', 'baguette', 'kesra', 'tuna_water', 'lben', 'dates', 'banana', 'chorba', 'couscous_dish', 'greek_yogurt', 'whey', 'olive_oil'].map((id) => { const f = foodById(id); return f ? `<button class="chip" data-act="add-food" data-id="${id}">${esc(f.n.split(' (')[0].split(',')[0])}</button>` : ''; }).join('')}</div></div>
+        ${S.meals.length ? `<div class="group"><div class="eyebrow">Favourites</div>${S.meals.map((m) => `<button class="food-row" data-act="add-saved" data-id="${m.id}"><div><b>${esc(m.name)}</b><span>${totals([m]).k} kcal · ${totals([m]).p} g protein</span></div><span class="add-btn">${icon('plus')}</span></button>`).join('')}</div>` : ''}
+        ${prevMeals.length ? `<div class="group"><div class="eyebrow">Repeat</div>${prevMeals.map((m) => `<button class="food-row" data-act="repeat-meal" data-id="${m.id}"><div><b>${esc(m.name || m.meal)} · ${fmtShort(m.date)}</b><span>${esc(m.items.map((i) => i.n).join(', '))}</span></div><span class="add-btn">${icon('repeat')}</span></button>`).join('')}</div>` : ''}
+        ${recent.length ? `<div class="group"><div class="eyebrow">Recent</div><div class="tiles">${recent.map(({ f, g }) => `<button class="tile" data-act="add-food" data-id="${f.id}" data-g="${g}"><b>${short(f)}</b><span>${g}${unitOf(f)} · ${itemFrom(f, g).k} kcal</span></button>`).join('')}</div></div>` : ''}
+        <div class="group"><div class="eyebrow">Quick picks</div><div class="tiles">${['egg', 'chicken_cooked', 'rice_cooked', 'pasta_cooked', 'baguette', 'kesra', 'tuna_water', 'lben', 'dates', 'banana', 'chorba', 'couscous_dish', 'greek_yogurt', 'whey', 'olive_oil', 'potato_boiled'].map((id) => { const f = foodById(id); if (!f) return ''; const g = f.u?.[0]?.[1] || 100; return `<button class="tile" data-act="add-food" data-id="${id}"><b>${short(f)}</b><span>${esc(f.u?.[0]?.[0] || `${g}${unitOf(f)}`)} · ${itemFrom(f, g).k} kcal</span></button>`; }).join('')}</div></div>
       ` : ''}
-      <button class="link" data-act="custom-food">${icon('plus')} Create custom food from a label</button>
+      <button class="link" data-act="custom-food">${icon('plus')} Custom food from a nutrition label</button>
       ${d.id ? `<button class="btn ghost block danger-text" data-act="delete-meal">Delete this entry</button>` : ''}
-      <div class="spacer"></div>`;
+      <div class="spacer" style="height:110px"></div>`;
 }
 
 function addItemToDraft(food, grams) {
@@ -614,35 +646,61 @@ function viewProgress() {
   const reports = Array.from({ length: 4 }, (_, i) => weeklyReport(S, addDays(weekStart(today()), -7 * i), today())).filter((r) => r.ws >= weekStart(S.state.startDate || today()));
   const planEnd = addMonths(S.state.startDate || today(), S.profile.planMonths || 8);
   const kgLeft = r1(Math.max(0, goal.target - goal.current));
+  const span = goal.target - goal.start || 1;
+  const pos = (kg) => clamp(((kg - goal.start) / span) * 100, 0, 100);
+  const rateTxt = goal.rate != null ? `${goal.rate > 0 ? '+' : ''}${goal.rate.toFixed(2)}` : '—';
+  const st = strengthTrendSafe(strength);
+  const exHist = exId ? exerciseHistory(S.workouts, exId) : [];
+  const exPr = personalRecords(exHist);
 
-  return `<header class="top"><div><div class="date">Goal · ${goal.target} kg</div><h1>Progress</h1></div>
+  return `<header class="top"><div><div class="date">Road to ${goal.target} kg</div><h1 class="display">Progress</h1></div>
       <button class="icon-btn" data-act="open-checkin" aria-label="Check-in">${icon('camera')}</button></header>
-    <div class="card hero">
-      <div class="hero-nums"><div><b>${r1(goal.current)}</b><span>kg now</span></div><div><b>${kgLeft}</b><span>kg to go</span></div><div><b>${goal.rate != null ? (goal.rate > 0 ? '+' : '') + goal.rate.toFixed(2) : '—'}</b><span>kg / week</span></div></div>
-      ${bar(goal.progress, 1, 'goal lg')}
-      <div class="ms">${goal.milestones.map((m) => `<div class="m ${m.reached ? 'on' : ''}"><i></i><b>${m.kg}</b><span>${m.reached ? 'done' : m.eta ? fmtShort(m.eta) : '—'}</span></div>`).join('')}</div>
-      <p class="small">${goal.eta ? `Projected: <b>${goal.target} kg around ${fmtMonthYear(goal.eta)}</b> at your current rate.` : 'A projected date appears once you have about 2 weeks of weigh-ins.'} Plan: ${fmtMonthYear(planEnd)} (${S.profile.planMonths || 8} months, adjustable).</p>
-      <p class="muted small">${esc(w.text)} Total weight is not the same as muscle — waist, strength and photos tell the rest.</p>
-    </div>
-    <div class="card"><div class="row-between"><div class="eyebrow">Body weight</div><button class="link" data-act="quick-weight">${icon('plus')} Add</button></div>
-      ${lineChart(ws.map((x) => ({ date: x.date, y: x.weight })), { target: goal.target, unit: ' kg', empty: 'Log your weight a few times to see the trend.' })}</div>
-    <div class="card"><div class="eyebrow">Calories</div><p>${esc(calorieAdviceText(adv))}</p>
-      ${adv.change ? `<button class="btn primary block" data-act="apply-adjust" data-v="${adv.change}">Apply ${adv.change > 0 ? '+' : ''}${adv.change} kcal → ${S.targets.kcal + adv.change} kcal</button>` : ''}
-      <p class="muted tiny">Targets: ${S.targets.kcal} kcal · ${S.targets.protein} P · ${S.targets.carbs} C · ${S.targets.fat} F. Changes are only suggested with ≥2 weeks of data and never applied without you.</p></div>
-    <div class="card"><div class="row-between"><div class="eyebrow">Photos</div><div>${prog.length >= 2 ? `<button class="link" data-act="open-compare">Compare</button>` : ''}<label class="link">${icon('plus')} Add<input type="file" accept="image/*" data-in="progress-photo" hidden></label></div></div>
-      ${prog.length ? `<div class="photo-grid">${prog.slice().reverse().map((p) => `<button data-act="open-compare" data-b="${p.id}"><img data-photo="${p.id}" alt=""><span>${fmtShort(p.date)}${p.note ? ' · ' + esc(p.note) : ''}</span></button>`).join('')}</div>` : '<p class="muted">Add your starting photos — front, side and back.</p>'}</div>
-    <div class="card"><div class="eyebrow">Strength</div><p class="small">${esc(strength.text)}</p>
+    <section class="card goal-hero">
+      <div class="gh-top"><div class="gh-now"><b class="num mega">${r1(goal.current)}</b><span>kg<br>now</span></div>
+        <div class="gh-target"><span class="eyebrow">Target</span><b class="num">${goal.target}</b></div></div>
+      <div class="track"><div class="track-fill" style="width:${goal.progress * 100}%"></div>
+        ${goal.milestones.map((m) => `<i class="tick ${m.reached ? 'on' : ''}" style="left:${pos(m.kg)}%"></i>`).join('')}
+        <i class="you" style="left:${goal.progress * 100}%"></i></div>
+      <div class="ms">${goal.milestones.map((m) => `<div class="m ${m.reached ? 'on' : ''}"><b>${m.kg}</b><span>${m.reached ? 'Done' : m.eta ? fmtShort(m.eta) : '—'}</span></div>`).join('')}</div>
+      <div class="gh-stats"><div><b class="num">${kgLeft}</b><span>kg to go</span></div><div><b class="num">${rateTxt}</b><span>kg / week</span></div><div><b class="num sm">${goal.eta ? fmtMonthYear(goal.eta) : '—'}</b><span>projected</span></div></div>
+      <p class="muted small">${esc(w.text)} Plan: ${fmtMonthYear(planEnd)} (${S.profile.planMonths || 8} months, adjustable). Scale weight isn’t muscle — waist, strength and photos tell the rest.</p>
+    </section>
+
+    <section class="card"><div class="section-head"><span class="eyebrow">Body weight</span><button class="link" data-act="quick-weight">${icon('plus')} Add</button></div>
+      ${lineChart(ws.map((x) => ({ date: x.date, y: x.weight })), { target: goal.target, unit: ' kg', empty: 'Log your weight a few times to see the trend.' })}</section>
+
+    <section class="card ${adv.change ? 'accent-card' : ''}"><div class="section-head"><span class="eyebrow">Calories</span><span class="muted tiny">${S.targets.kcal} kcal · P${S.targets.protein} C${S.targets.carbs} F${S.targets.fat}</span></div>
+      <p class="lead">${esc(calorieAdviceText(adv))}</p>
+      ${adv.change ? `<button class="btn primary lg block" data-act="apply-adjust" data-v="${adv.change}">Apply ${adv.change > 0 ? '+' : ''}${adv.change} kcal → ${S.targets.kcal + adv.change}</button>` : ''}
+      <p class="muted tiny">Suggested only with 2+ weeks of data. Never applied without you.</p></section>
+
+    <section class="card"><div class="section-head"><span class="eyebrow">Photos</span><span>${prog.length >= 2 ? `<button class="link" data-act="open-compare">Compare</button>` : ''}<label class="link">${icon('plus')} Add<input type="file" accept="image/*" data-in="progress-photo" hidden></label></span></div>
+      ${prog.length >= 2 ? `<button class="duo" data-act="open-compare"><div><img data-photo="${prog[0].id}" alt=""><span>${fmtShort(prog[0].date)} · Start</span></div><div><img data-photo="${prog.at(-1).id}" alt=""><span>${fmtShort(prog.at(-1).date)} · Latest</span></div></button>` : ''}
+      ${prog.length ? `<div class="photo-grid">${prog.slice().reverse().map((p) => `<button data-act="open-compare" data-b="${p.id}"><img data-photo="${p.id}" alt=""><span>${fmtShort(p.date)}${p.note ? ' · ' + esc(p.note) : ''}</span></button>`).join('')}</div>` : '<p class="muted">Add your starting photos — front, side and back.</p>'}</section>
+
+    <section class="card"><div class="section-head"><span class="eyebrow">Strength</span>${st ? `<span class="muted tiny">${st}</span>` : ''}</div>
+      <p class="small">${esc(strength.text)}</p>
       ${trackable.length ? `<select class="inline-select" data-in="progress-ex">${trackable.map((e) => `<option value="${e.id}" ${e.id === exId ? 'selected' : ''}>${esc(e.name)}</option>`).join('')}</select>
-      ${lineChart(exerciseHistory(S.workouts, exId).map((x) => ({ date: x.date, y: r1(x.best) })), { unit: ' kg', empty: 'Needs two sessions of this exercise.' })}
-      <p class="muted tiny">Estimated 1-rep max (Epley) from your best set — a fair way to compare sets with different reps.</p>` : ''}</div>
-    ${meas.length ? `<div class="card"><div class="eyebrow">Measurements (cm)</div><div class="meas">${meas.map((k) => { const pts = S.body.filter((b) => b[k] > 0); const f = pts[0][k], l = pts.at(-1)[k]; return `<div><span>${k}</span><b>${r1(l)}</b><em class="${l - f > 0 ? 'pos' : l - f < 0 ? 'neg' : ''}">${l - f > 0 ? '+' : ''}${r1(l - f)}</em></div>`; }).join('')}</div>
-      ${S.body.filter((b) => b.waist > 0).length >= 2 ? `<div class="eyebrow">Waist</div>${lineChart(S.body.filter((b) => b.waist > 0).map((b) => ({ date: b.date, y: b.waist })), { unit: ' cm' })}<p class="muted tiny">If waist rises much faster than ~1 cm per 2–3 kg gained, the gain is getting less lean.</p>` : ''}</div>` : ''}
-    <div class="card"><div class="eyebrow">Nutrition · last 14 days</div>
+      ${exPr ? `<div class="mini-stats"><div><b class="num">${exPr.heaviest.value}</b><span>heaviest kg</span></div><div><b class="num">${exPr.e1rm.value}</b><span>est. 1RM kg</span></div><div><b class="num">${exHist.length}</b><span>sessions</span></div></div>` : ''}
+      ${lineChart(exHist.map((x) => ({ date: x.date, y: r1(x.best) })), { unit: ' kg', empty: 'Needs two sessions of this exercise.' })}
+      <p class="muted tiny">Estimated 1-rep max (Epley) from your best set, so different rep counts compare fairly.</p>` : ''}</section>
+
+    ${meas.length ? `<section class="card"><div class="eyebrow">Measurements · cm</div><div class="meas">${meas.map((k) => { const pts = S.body.filter((b) => b[k] > 0); const f = pts[0][k], l = pts.at(-1)[k]; return `<div><span>${k}</span><b class="num">${r1(l)}</b><em class="${l - f > 0 ? 'pos' : l - f < 0 ? 'neg' : ''}">${l - f > 0 ? '+' : ''}${r1(l - f)}</em></div>`; }).join('')}</div>
+      ${S.body.filter((b) => b.waist > 0).length >= 2 ? `<div class="eyebrow">Waist</div>${lineChart(S.body.filter((b) => b.waist > 0).map((b) => ({ date: b.date, y: b.waist })), { unit: ' cm' })}<p class="muted tiny">If your waist grows much faster than ~1 cm per 2–3 kg gained, the gain is getting less lean.</p>` : ''}</section>` : ''}
+
+    <section class="card"><div class="section-head"><span class="eyebrow">Fuel · 14 days</span><span class="legend"><i class="lg-hit"></i>protein hit</span></div>
       ${barChart(days14.map((d) => ({ label: d.slice(8), v: dt[d]?.k || 0, hit: dt[d] && dt[d].p >= S.targets.protein * 0.9 })), S.targets.kcal)}
-      <p class="muted tiny">Bars: calories vs target line. Highlighted: protein target reached.</p></div>
-    <div class="card"><div class="eyebrow">Weekly reports</div>${reports.length ? reports.map((r) => `<div class="report"><b>${r.title}</b><ul class="plain">${r.lines.map((l) => `<li>${esc(l)}</li>`).join('')}</ul></div>`).join('') : '<p class="muted">Your first report appears after the first week.</p>'}
-      <button class="link" data-act="open-coach">${icon('spark')} Ask the coach</button></div>
+      <p class="muted tiny">Calories per day vs the dashed target line.</p></section>
+
+    <section class="card"><div class="section-head"><span class="eyebrow">Weekly reports</span><button class="link" data-act="open-coach">${icon('spark')} Ask coach</button></div>
+      ${reports.length ? reports.map((r) => `<div class="report"><b class="display-sm">${r.title}</b><ul class="plain">${r.lines.map((l) => `<li>${esc(l)}</li>`).join('')}</ul></div>`).join('') : '<p class="muted">Your first report appears after the first week.</p>'}</section>
     <div class="spacer"></div>`;
+}
+
+function strengthTrendSafe(strength) {
+  const s = strength.st;
+  if (!s || !s.rows.length || s.avgChange == null) return '';
+  return `${s.avgChange >= 0 ? '+' : ''}${(s.avgChange * 100).toFixed(1)}% · 6 wk`;
 }
 
 /* ───────────────────────── Coach & references ───────────────────────── */
@@ -789,7 +847,7 @@ const actions = {
   'unskip': async (el) => { S.active.exercises[+el.dataset.i].skipped = false; await saveKV('active'); renderSheet(); },
   'toggle-pain': async (el) => { const e = S.active.exercises[+el.dataset.i]; e.pain = !e.pain; await saveKV('active'); renderSheet(); },
   'set-diff': async (el) => { S.active.exercises[+el.dataset.i].diff = el.dataset.v; await saveKV('active'); renderSheet(); },
-  'rest-add': () => { if (UI.timer) { UI.timer.end += 15000; UI.timer.beeped = false; renderSheet(); } },
+  'rest-add': () => { if (UI.timer) { UI.timer.end += 15000; UI.timer.total += 15000; UI.timer.beeped = false; renderSheet(); } },
   'rest-skip': () => { UI.timer = null; renderSheet(); },
   'finish-workout': () => finishWorkout(),
   'discard-workout': async () => { if (!confirm('Discard this workout? Nothing from it will be saved.')) return; S.active = null; UI.timer = null; await db.kvSet('active', null); closeSheet(); },
@@ -932,7 +990,8 @@ async function showStorage() {
 }
 new MutationObserver(() => showStorage()).observe(sheetEl, { childList: true });
 
-if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+// Local development skips the offline cache (add ?sw to test it) so edits show immediately.
+if ('serviceWorker' in navigator && location.protocol !== 'file:' && (location.hostname !== 'localhost' || location.search.includes('sw'))) {
   navigator.serviceWorker.register('./sw.js').then((reg) => {
     reg.update().catch(() => {});
     document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') reg.update().catch(() => {}); });
