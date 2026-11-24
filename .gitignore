@@ -1,0 +1,8 @@
+# Personal data — never committed
+private/
+*.backup.json
+coach-backup-*.json
+coach-setup*.json
+.DS_Store
+node_modules/
+.claude/
