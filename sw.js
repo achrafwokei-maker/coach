@@ -1,6 +1,6 @@
 // Offline-first service worker. VERSION is bumped automatically by scripts/deploy.sh.
 // Personal data lives in IndexedDB and is never touched by updates.
-const VERSION = '20261125-162848';
+const VERSION = '20261125-163503';
 const CACHE = `coach-${VERSION}`;
 const FILES = [
   './', './index.html', './manifest.webmanifest', './css/app.css',

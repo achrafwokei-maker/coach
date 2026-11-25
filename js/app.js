@@ -68,8 +68,7 @@ function render() {
   main.innerHTML = `<div class="pages" id="pages">
       <section class="page p-train">${viewTrainingPage()}</section>
       <section class="page p-meals">${viewMealsPage()}</section>
-      <section class="page p-prog">${viewProgressPage()}</section></div>
-    <nav class="dots glass" aria-label="Pages">${PAGES.map((p, i) => `<button class="d-${p} ${i === UI.page ? 'on' : ''}" data-act="go-page" data-i="${i}" aria-label="${['Training', 'Meals', 'Progress'][i]}"></button>`).join('')}</nav>`;
+      <section class="page p-prog">${viewProgressPage()}</section></div>`;
   const pg = $('#pages');
   pg.scrollLeft = UI.page * pg.clientWidth;
   main.querySelectorAll('.page').forEach((p, i) => { if (old[i]) p.scrollTop = old[i]; });
@@ -88,7 +87,6 @@ function render() {
       if (i !== UI.page) {
         UI.page = i; UI.enter = i; document.body.dataset.page = PAGES[i];
         const pe = pagesEls[i]; pe.classList.add('enter'); setTimeout(() => pe.classList.remove('enter'), 900);
-        main.querySelectorAll('.dots button').forEach((d, k) => d.classList.toggle('on', k === i));
       }
     }, 60);
   }, { passive: true });
@@ -268,9 +266,6 @@ function viewTrainingPage() {
   const hist = finishedWorkouts(S.workouts).slice().reverse();
   return `${head(kicker, esc(day.name))}
     <div class="seg3 glass">${S.program.rotation.map((id) => `<button class="${id === td.dayId ? 'on' : ''}" data-act="pick-day" data-v="${id}">${esc(dayLabel(id))}${id === td.suggested && id !== td.dayId ? '<i></i>' : ''}</button>`).join('')}</div>
-    <div class="glass t-sum"><div class="ring-sm" style="--p:${(count / exs.length) * 100}"><b>${count}/${exs.length}</b></div>
-      <div><b>${td.state === 'done' ? 'Workout complete' : count ? 'Keep going' : 'Tap an exercise to log it'}</b>
-      <span>${td.state === 'done' ? `Next: ${esc(dayLabel(td.plan.next))}` : `Warm-up: ${esc(day.warmup[0])}`}</span></div></div>
     <div class="ex-stack">${exs.map((e, i) => {
       const l = loggedOf(e.id);
       const did = isDone(l);
