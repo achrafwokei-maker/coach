@@ -105,6 +105,7 @@ function renderSheet() {
   const nb = $('.sheet-body', sheetEl);
   if (nb && same) nb.scrollTop = y;
   loadThumbs(sheetEl);
+  initWheels(sheetEl);
 }
 function openSheet(kind, data = {}) { UI.sheet = { kind, ...data }; sheetEl.dataset.kind = ''; renderSheet(); }
 function closeSheet() {
@@ -194,6 +195,62 @@ function ensureActive(dayId) {
   return S.active;
 }
 
+/* iPhone-style scroll wheels for weight and reps */
+const START_KG = { barbell: 20, smith: 10, dumbbell: 10, machine: 20, plate: 40, cable: 15 };
+const MAX_KG = { barbell: 200, smith: 200, dumbbell: 60, machine: 150, plate: 400, cable: 120 };
+const WH = 40; // wheel row height (px), must match CSS
+function wheelValues(kind, ex, cur) {
+  if (kind === 'r') return Array.from({ length: 50 }, (_, k) => k + 1);
+  const step = ex.inc > 0 ? ex.inc : 2.5;
+  const max = MAX_KG[ex.equip] || 150;
+  const vals = [];
+  for (let v = 0; v <= max + 1e-9; v = r1(v + step)) vals.push(r1(v));
+  const c = parseFloat(cur);
+  if (c >= 0 && !vals.includes(c)) { vals.push(c); vals.sort((a, b) => a - b); }
+  return vals;
+}
+const wheel = (kind, i, j, vals, cur, label) => `<div class="wheel" data-wheel="${kind}" data-i="${i}" data-j="${j}" data-val="${cur}" aria-label="${label}">
+  <div class="wheel-pad"></div>${vals.map((v) => `<div class="wv" data-v="${v}">${v}</div>`).join('')}<div class="wheel-pad"></div></div>`;
+function initWheels(root) {
+  root.querySelectorAll('.wheel').forEach((wh) => {
+    const items = [...wh.querySelectorAll('.wv')];
+    const start = Math.max(0, items.findIndex((x) => +x.dataset.v === +wh.dataset.val));
+    wh.scrollTop = start * WH;
+    let last = -1;
+    const mark = () => {
+      const k = Math.max(0, Math.min(items.length - 1, Math.round(wh.scrollTop / WH)));
+      if (k !== last) { items.forEach((x, n) => { const d = Math.abs(n - k); x.className = `wv${d === 0 ? ' sel' : d === 1 ? ' n1' : ''}`; }); last = k; }
+      return k;
+    };
+    mark();
+    let t, raf;
+    wh.addEventListener('scroll', () => {
+      if (!raf) raf = requestAnimationFrame(() => { raf = null; mark(); });
+      clearTimeout(t);
+      t = setTimeout(() => {
+        const v = +items[mark()].dataset.v;
+        const set = S.active?.exercises[+wh.dataset.i]?.sets[+wh.dataset.j];
+        if (!set) return;
+        const kind = wh.dataset.wheel, before = +set[kind];
+        set[kind] = v; wh.dataset.val = v;
+        // Changing set 1 carries down to later sets that still had the same value.
+        if (+wh.dataset.j === 0 && before !== v) {
+          const ex = S.active.exercises[+wh.dataset.i];
+          ex.sets.forEach((o, n) => {
+            if (n === 0 || +o[kind] !== before) return;
+            o[kind] = v;
+            const other = root.querySelector(`.wheel[data-wheel="${kind}"][data-i="${wh.dataset.i}"][data-j="${n}"]`);
+            const idx = [...other.querySelectorAll('.wv')].findIndex((x) => +x.dataset.v === v);
+            if (other && idx >= 0) { other.dataset.val = v; other.scrollTo({ top: idx * WH, behavior: 'smooth' }); }
+          });
+        }
+        saveKV('active');
+      }, 110);
+    }, { passive: true });
+    wh.addEventListener('click', (ev) => { const it = ev.target.closest('.wv'); if (it) wh.scrollTo({ top: items.indexOf(it) * WH, behavior: 'smooth' }); });
+  });
+}
+
 function viewLog({ id }) {
   const td = trainingDay();
   const w = ensureActive(td.dayId);
@@ -204,6 +261,11 @@ function viewLog({ id }) {
   const bw = ex.equip === 'bodyweight';
   const last = rec.prev;
   const unit = EQUIP[ex.equip]?.unit || '';
+  // Wheels always show a number: start from today's target, last time, or a sensible starting weight.
+  e.sets.forEach((st) => {
+    if (!bw && (st.w === '' || st.w == null)) st.w = rec.weight ?? last?.top ?? START_KG[ex.equip] ?? 20;
+    if (st.r === '' || st.r == null || !(+st.r > 0)) st.r = rec.reps || ex.reps[1];
+  });
   return `<div class="sheet-head"><button class="glass-btn" data-act="close-sheet" aria-label="Close">${icon('down')}</button>
       <div class="center"><b>${esc(ex.name)}</b><span>${ex.sets[0]}–${ex.sets[1]} sets · ${ex.reps[0] === ex.reps[1] ? ex.reps[0] : ex.reps.join('–')} reps</span></div><span></span></div>
     <div class="sheet-body">
@@ -212,8 +274,8 @@ function viewLog({ id }) {
         ${last ? `<span class="tc-last">Last time · ${last.sets.map((s) => (bw ? `${s.r}` : `${s.w}×${s.r}`)).join(' · ')}</span>` : ''}</div>
       <div class="log-sets"><div class="ls-h"><span></span>${bw ? '' : `<span>kg <small>${esc(unit.replace(/^kg ?/, ''))}</small></span>`}<span>reps</span></div>
         ${e.sets.map((s, j) => `<div class="ls-row ${bw ? 'bw' : ''}"><span class="n">${j + 1}</span>
-          ${bw ? '' : `<input inputmode="decimal" placeholder="kg" value="${s.w}" data-in="set-w" data-i="${i}" data-j="${j}" aria-label="Weight set ${j + 1}">`}
-          <input inputmode="numeric" placeholder="reps" value="${s.r}" data-in="set-r" data-i="${i}" data-j="${j}" aria-label="Reps set ${j + 1}"></div>`).join('')}
+          ${bw ? '' : `<div class="wheel-wrap">${wheel('w', i, j, wheelValues('w', ex, s.w), s.w, `Weight set ${j + 1}`)}</div>`}
+          <div class="wheel-wrap">${wheel('r', i, j, wheelValues('r', ex, s.r), s.r, `Reps set ${j + 1}`)}</div></div>`).join('')}
         <div class="ls-more"><button data-act="add-set" data-i="${i}">${icon('plus')} Set</button>${e.sets.length > 1 ? `<button data-act="remove-set" data-i="${i}">${icon('minus')} Set</button>` : ''}</div></div>
       <div class="feel"><span>How hard?</span><div class="feel-row">${[['easy', 'Easy'], ['good', 'Good'], ['hard', 'Hard'], ['max', 'Too hard']].map(([k, l]) => `<button class="${e.diff === k ? 'on' : ''}" data-act="set-diff" data-i="${i}" data-v="${k}">${l}</button>`).join('')}</div></div>
       <button class="glass-cta" data-act="save-ex" data-i="${i}">${icon('check')} Done</button>
@@ -951,7 +1013,7 @@ const actions = {
   'save-ex': async (el) => {
     const e = S.active.exercises[+el.dataset.i];
     const bw = exMap()[e.exId]?.equip === 'bodyweight';
-    e.sets.forEach((s) => { s.done = +s.r > 0 && (bw || +s.w > 0 || s.w === '0'); });
+    e.sets.forEach((s) => { s.done = +s.r > 0 && (bw || +s.w >= 0); });
     if (!e.sets.some((s) => s.done)) return toast(bw ? 'Enter your reps first.' : 'Enter weight and reps first.');
     e.saved = true; e.skipped = false;
     UI.justDone = e.exId; setTimeout(() => { UI.justDone = null; }, 900);
