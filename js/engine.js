@@ -408,3 +408,23 @@ export function applyCalorieChange(t, change) {
 }
 
 export const macroKcal = (t) => Math.round(t.protein * 4 + t.carbs * 4 + t.fat * 9);
+
+// Plain answer to "did I reach my nutrition goal today?"
+// Calories count as reached within ±10% of target; protein from 90% of target.
+export function nutritionVerdict(t, T, hasFood) {
+  const kLow = t.k < T.kcal * 0.9, kHigh = t.k > T.kcal * 1.1, pOk = t.p >= T.protein * 0.9;
+  if (!hasFood) return { status: 'empty', title: 'Nothing logged yet', text: `Today’s goal: ${T.kcal} kcal and ${T.protein} g protein.` };
+  if (!kLow && !kHigh && pOk) return { status: 'done', title: 'Goal reached', text: 'Calories and protein are on target today.' };
+  if (kHigh) return { status: 'over', title: `${Math.round(t.k - T.kcal)} kcal over`, text: pOk ? 'Protein reached. Slightly over on calories — fine once in a while.' : `Over on calories but still ${Math.round(T.protein - t.p)} g protein short.` };
+  const need = [];
+  if (kLow) need.push(`${Math.round(T.kcal - t.k)} kcal`);
+  if (!pOk) need.push(`${Math.round(T.protein - t.p)} g protein`);
+  return { status: 'todo', title: 'Not reached yet', text: `Still ${need.join(' and ')} to go.` };
+}
+
+// Per-macro status for the checklist: 'ok' (90–115%), 'low', 'high'.
+export function macroStatus(val, target) {
+  if (!target) return 'ok';
+  const r = val / target;
+  return r < 0.9 ? 'low' : r > 1.15 ? 'high' : 'ok';
+}

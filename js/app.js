@@ -6,7 +6,7 @@ import { DEFAULT_PROGRAM, cloneProgram, allExercises, EQUIP } from './program.js
 import { FOODS, MEAL_TEMPLATES } from './foods.js';
 import {
   exerciseHistory, recommend, personalRecords, prsInWorkout, weeklyVolume, DIFFICULTY, itemFrom, totals,
-  parseFoodText, suggestMeals, weights, goalStatus, calorieAdvice, applyCalorieChange, macroKcal, dailyTotals, finishedWorkouts, e1rm,
+  parseFoodText, suggestMeals, nutritionVerdict, macroStatus, weights, goalStatus, calorieAdvice, applyCalorieChange, macroKcal, dailyTotals, finishedWorkouts, e1rm,
 } from './engine.js';
 import { buildContext, coachAnswers, dailyMessage, weeklyReport, calorieAdviceText } from './coach.js';
 import { icon, ring, bar, lineChart, barChart, STATUS } from './ui.js';
@@ -94,7 +94,7 @@ function loadThumbs(root) {
     const id = img.dataset.photo, full = img.dataset.full === '1';
     const key = id + (full ? ':f' : ':t');
     if (urlCache.has(key)) { img.src = urlCache.get(key); return; }
-    const p = S.photos.find((x) => x.id === id) || S.food.find((f) => f.photo?.id === id)?.photo || (UI.mealDraft?.photo?.id === id ? UI.mealDraft.photo : null);
+    const p = S.photos.find((x) => x.id === id) || S.food.find((f) => f.photo?.id === id)?.photo || (UI.mealDraft?.photo?.id === id ? UI.mealDraft.photo : null) || (UI.pendingPhoto?.id === id ? UI.pendingPhoto : null);
     const blob = p && (full ? p.blob : p.thumb || p.blob);
     if (blob) { const u = URL.createObjectURL(blob); urlCache.set(key, u); img.src = u; }
   });
@@ -145,7 +145,15 @@ function viewToday() {
   const T = S.targets;
   const msg = dailyMessage(ctx);
   const foodToday = S.food.filter((e) => e.date === today()).sort(byDate);
-  const sugg = suggestMeals(rem, MEAL_TEMPLATES, allFoods(), hour(), 2);
+  const verdict = nutritionVerdict(tot, T, foodToday.length > 0);
+  const yFood = S.food.filter((e) => e.date === addDays(today(), -1));
+  const yest = yFood.length ? nutritionVerdict(totals(yFood), T, true) : null;
+  const pctK = Math.min(999, (tot.k / T.kcal) * 100);
+  const mrow = (label, val, target, unit) => {
+    const st = macroStatus(val, target);
+    return `<div class="mrow m-${st}"><span class="m-l">${label}</span><span class="m-v"><b>${big(val)}</b> / ${big(target)} ${unit}</span>
+      <span class="m-s">${st === 'ok' ? icon('check') : st === 'high' ? 'over' : `${big(target - val)} left`}</span><div class="m-bar"><i style="width:${Math.min(100, (val / target) * 100)}%"></i></div></div>`;
+  };
   const due = checkInDue();
   const standalone = navigator.standalone || matchMedia('(display-mode: standalone)').matches;
   const next = goal.milestones.find((m) => !m.reached);
@@ -197,27 +205,26 @@ function viewToday() {
     <button class="coach-line" data-act="open-coach"><span class="coach-tag">Coach</span><p>${esc(msg)}</p>${icon('chev', 'dim')}</button>
     ${hero}
     <section class="card fuel">
-      <div class="section-head"><span class="eyebrow">Fuel</span><span class="muted small">${big(tot.k)} / ${big(T.kcal)} kcal</span></div>
-      <div class="kcal-big"><b class="num xl ${rem.k < 0 ? 'neg' : ''}">${big(Math.abs(rem.k))}</b><span>kcal<br>${rem.k >= 0 ? 'left' : 'over'}</span></div>
-      <div class="bar thick"><i style="width:${pct}%"></i></div>
-      <div class="mcols">${macro('p', 'Protein', tot.p, T.protein)}${macro('c', 'Carbs', tot.c, T.carbs)}${macro('f', 'Fat', tot.f, T.fat)}</div>
-      <button class="btn primary lg block" data-act="add-meal">${icon('plus')} Add meal</button>
+      <div class="section-head"><span class="eyebrow">Nutrition today</span>${yest ? `<span class="yest v-${yest.status}">Yesterday: ${esc(yest.title)}</span>` : ''}</div>
+      <div class="verdict v-${verdict.status}"><span class="v-ic">${verdict.status === 'done' ? icon('check') : verdict.status === 'over' ? '!' : verdict.status === 'empty' ? '–' : `${Math.round(pctK)}%`}</span>
+        <div><b>${esc(verdict.title)}</b><p>${esc(verdict.text)}</p></div></div>
+      <div class="mrows">${mrow('Calories', tot.k, T.kcal, 'kcal')}${mrow('Protein', tot.p, T.protein, 'g')}${mrow('Carbs', tot.c, T.carbs, 'g')}${mrow('Fat', tot.f, T.fat, 'g')}</div>
+      <form class="quick" data-form="quick-food">
+        ${UI.pendingPhoto ? `<button type="button" class="q-photo" data-act="drop-photo" aria-label="Remove photo"><img data-photo="${UI.pendingPhoto.id}" alt=""><i>${icon('x')}</i></button>` : `<label class="q-btn" aria-label="Add a photo">${icon('camera')}<input type="file" accept="image/*" data-in="quick-photo" hidden></label>`}
+        <input id="quick-q" name="q" placeholder="${UI.pendingPhoto ? 'What’s in the photo?' : 'What did you eat?'}" autocomplete="off" autocorrect="off" enterkeyhint="done">
+        <button class="q-go" type="submit" aria-label="Add">${icon('plus')}</button>
+      </form>
+      ${UI.quickMsg ? `<div class="quick-msg ${UI.quickMsg.cls || ''}">${UI.quickMsg.html}</div>` : `<p class="muted tiny q-hint">Write or dictate (🎤 on the keyboard) — e.g. “3 eggs, bread, a glass of lben”. English or French.</p>`}
       ${foodToday.length ? `<ul class="entries">${foodToday.map((e) => `<li data-act="edit-meal" data-id="${e.id}">
           ${e.photo ? `<img class="thumb-sm" data-photo="${e.photo.id}" alt="">` : `<i class="dot-ic">${esc((e.meal || 'M')[0])}</i>`}
-          <div><b>${esc(e.name || e.meal)}</b><span>${esc(e.items.map((i) => i.n).join(', '))}</span></div><em>${totals([e]).k}<small>kcal</small></em></li>`).join('')}</ul>` : ''}
+          <div><b>${esc(e.name || e.meal)}</b><span>${esc(e.items.map((i) => i.n.split(',')[0].split(' (')[0]).join(', '))}</span></div><em>${totals([e]).k}<small>kcal</small></em></li>`).join('')}</ul>` : ''}
+      <button class="link" data-act="add-meal">${icon('plus')} Pick foods from the list</button>
     </section>
-    ${sugg.length ? `<section class="next-eat"><div class="eyebrow">Eat next</div>${sugg.map((s, i) => `<button class="sugg" data-act="log-suggestion" data-i="${i}">
-        <div><b>${esc(s.name)}</b><span>${s.items.map((it) => `${it.g}g ${it.n.split(',')[0].split('(')[0].trim().toLowerCase()}`).join(' · ')}</span></div>
-        <em><b>${s.tot.k}</b>kcal · ${Math.round(s.tot.p)}g P</em>${icon('plus', 'add')}</button>`).join('')}</section>` : ''}
     <div class="row-cards">
       <button class="card tick ${day.creatine ? 'on' : ''}" data-act="toggle-creatine"><span class="tickbox">${icon('check')}</span><div><b>Creatine</b><span>${day.creatine ? 'Taken' : `${S.profile.creatine || 5} g today`}</span></div></button>
       <button class="card goal-mini" data-act="tab" data-tab="progress"><span class="eyebrow">Goal</span><b class="num">${r1(goal.current)}<small> → ${goal.target}</small></b>${bar(goal.progress, 1, 'goal')}<span>${next ? `Next ${next.kg} kg` : 'Reached'}</span></button>
     </div>
-    ${due ? `<button class="card due" data-act="open-checkin">${icon('camera')}<div><b>${due}</b><span>Weight, photos, optional measurements · 1 min</span></div>${icon('chev', 'dim')}</button>` : ''}
-    <section class="card checkin"><div class="section-head"><span class="eyebrow">Recovery</span><button class="link" data-act="quick-weight">${icon('plus')} Weight</button></div>
-      <div class="chips-row"><span>Sleep</span>${[5, 6, 7, 8, 9].map((h) => `<button class="chip ${day.sleep === h ? 'on' : ''}" data-act="set-sleep" data-v="${h}">${h}${h === 9 ? '+' : ''}</button>`).join('')}</div>
-      <div class="chips-row"><span>Energy</span>${[['Low', 1], ['OK', 2], ['High', 3]].map(([l, v]) => `<button class="chip ${day.energy === v ? 'on' : ''}" data-act="set-energy" data-v="${v}">${l}</button>`).join('')}</div>
-    </section>
+    ${due ? `<button class="card due" data-act="open-checkin">${icon('camera')}<div><b>${due}</b><span>Weight and progress photos · 1 min</span></div>${icon('chev', 'dim')}</button>` : ''}
     <div class="spacer"></div>`;
 }
 
@@ -471,7 +478,7 @@ function viewMeal() {
   const tot = totals([{ items: d.items }]);
   return `<div class="sheet-head"><button class="icon-btn" data-act="close-sheet" aria-label="Close">${icon('x')}</button>
       <div class="center"><select class="meal-select" data-in="meal-type">${['Breakfast', 'Lunch', 'Snack', 'Dinner', 'Pre-workout', 'Post-workout'].map((m) => `<option ${m === d.meal ? 'selected' : ''}>${m}</option>`).join('')}</select></div>
-      <label class="icon-btn cam" aria-label="Add photo">${icon('camera')}<input type="file" accept="image/*" data-in="meal-photo" hidden></label></div>
+      <span></span></div>
     <div class="sheet-body meal-body">
       <div class="search-row">${icon('spark', 'search-ic')}<input id="meal-q" class="big-input" placeholder="“3 eggs, 200 g rice…”" value="${esc(d.q)}" data-in="meal-q" autocomplete="off" autocorrect="off" enterkeyhint="done"></div>
       <p class="muted tiny hint-line">Type or tap 🎤 on the keyboard to dictate — English or French.</p>
@@ -516,6 +523,26 @@ function mealResults() {
       <button class="link" data-act="custom-food">${icon('plus')} Custom food from a nutrition label</button>
       ${d.id ? `<button class="btn ghost block danger-text" data-act="delete-meal">Delete this entry</button>` : ''}
       <div class="spacer" style="height:110px"></div>`;
+}
+
+const shortName = (n) => n.split(',')[0].split(' (')[0];
+async function quickAdd(text) {
+  text = text.trim();
+  if (!text) { if (UI.pendingPhoto) toast('Type what’s in the photo first.'); return; }
+  const { items, unknown } = parseFoodText(text, allFoods());
+  if (!items.length) {
+    UI.quickMsg = { cls: 'bad', html: `Couldn’t find “${esc(text)}”. Try simple words like “chicken 150g”, or <button class="link inline" data-act="custom-food" data-name="${esc(text)}">add it as a new food</button>.` };
+    render(); return;
+  }
+  const entry = { id: uid(), date: today(), t: Date.now(), meal: mealName(), name: '', note: text, items: items.map((p) => itemFrom(p.food, p.grams)), photo: UI.pendingPhoto || null };
+  await db.put('food', entry);
+  S.food = S.food.concat(entry).sort(byDate);
+  UI.pendingPhoto = null; UI.lastAdd = entry.id;
+  const t = totals([entry]);
+  UI.quickMsg = { cls: 'good', html: `${icon('check')} Added ${items.map((p) => `${esc(shortName(p.food.n).toLowerCase())} <small>${p.grams}${p.food.ml ? 'ml' : 'g'}</small>`).join(', ')} — <b>${t.k} kcal · ${Math.round(t.p)} g protein</b>
+    <span class="qm-actions"><button class="link inline" data-act="edit-meal" data-id="${entry.id}">Change amounts</button><button class="link inline" data-act="undo-add">Undo</button></span>
+    ${unknown.length ? `<span class="qm-warn">Not found: ${unknown.map(esc).join(', ')} — <button class="link inline" data-act="custom-food" data-name="${esc(unknown[0])}">add it</button></span>` : ''}` };
+  render();
 }
 
 function addItemToDraft(food, grams) {
@@ -812,7 +839,9 @@ async function setDay(patch) {
 }
 
 const actions = {
-  'tab': (el) => { UI.tab = el.dataset.tab; main.scrollTop = 0; render(); },
+  'tab': (el) => { UI.tab = el.dataset.tab; UI.quickMsg = null; main.scrollTop = 0; render(); },
+  'undo-add': async () => { if (!UI.lastAdd) return; await db.del('food', UI.lastAdd); S.food = S.food.filter((e) => e.id !== UI.lastAdd); UI.lastAdd = null; UI.quickMsg = null; render(); toast('Removed'); },
+  'drop-photo': () => { UI.pendingPhoto = null; UI.quickMsg = null; render(); },
   'close-sheet': () => closeSheet(),
   'onb-save': () => onboardSave(),
   'open-settings': () => openSheet('settings', { full: true }),
@@ -957,6 +986,12 @@ const inputs = {
   'pe-finisher': (el) => { S.program.days[UI.editDay].finisher = el.value; saveKV('program'); },
 };
 const changes = {
+  'quick-photo': async (el) => {
+    const f = el.files[0]; if (!f) return;
+    UI.pendingPhoto = { id: uid(), blob: await resizeImage(f, 1000), thumb: await resizeImage(f, 240) };
+    UI.quickMsg = { cls: 'info', html: `${icon('camera')} Photo ready. Now write what’s on the plate (e.g. “couscous with chicken, a glass of lben”) and tap <b>+</b>. The app can’t read food from a picture, so your words give the numbers.` };
+    render(); setTimeout(() => $('#quick-q')?.focus(), 50);
+  },
   'item-g': () => renderSheet(),
   'meal-fav': (el) => { UI.mealDraft.fav = el.checked; renderSheet(); },
   'meal-photo': async (el) => { const f = el.files[0]; if (!f) return; const blob = await resizeImage(f, 1000); const thumb = await resizeImage(f, 240); UI.mealDraft.photo = { id: uid(), blob, thumb }; renderSheet(); },
@@ -974,6 +1009,9 @@ const changes = {
     } catch (e) { alert(e.message || 'Could not read this file.'); }
   },
 };
+document.addEventListener('submit', (ev) => {
+  if (ev.target.dataset.form === 'quick-food') { ev.preventDefault(); const q = ev.target.q; q.blur(); quickAdd(q.value); }
+});
 document.addEventListener('input', (ev) => { const fn = inputs[ev.target.dataset?.in]; if (fn) fn(ev.target); });
 document.addEventListener('change', (ev) => { const fn = changes[ev.target.dataset?.in]; if (fn) fn(ev.target); });
 document.addEventListener('focusin', (ev) => { if (ev.target.matches('.set input')) setTimeout(() => ev.target.select(), 0); });

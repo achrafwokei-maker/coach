@@ -3,7 +3,7 @@
 import { addDays, daysBetween, weekStart, r1, avg, fmtShort, fmtLong } from './util.js';
 import {
   todayPlan, finishedWorkouts, nutritionSummary, totals, remaining, goalStatus, calorieAdvice,
-  strengthTrend, performanceDip, weeklyVolume, prsInWorkout, GAIN_BAND, suggestMeals,
+  strengthTrend, performanceDip, weeklyVolume, prsInWorkout, GAIN_BAND, suggestMeals, nutritionVerdict,
 } from './engine.js';
 import { allExercises } from './program.js';
 import { FOODS, MEAL_TEMPLATES } from './foods.js';
@@ -46,7 +46,7 @@ export function recoveryAssessment(ctx) {
     const a = avg(sleeps);
     if (a < 7) { notes.push(`Average sleep ${r1(a)} h — below the 7–9 h recommended for adults; muscle recovery suffers.`); status = 'warn'; }
     else notes.push(`Average sleep ${r1(a)} h — good.`);
-  } else notes.push('Log sleep on the Today screen a few times a week to let me check recovery.');
+  }
   if (energy.length >= 3 && avg(energy) < 1.7) { notes.push('Energy has been low most days.'); status = 'warn'; }
   if (dip.flagged) { notes.push(`Performance dropped on ${dip.worse} of ${dip.total} exercises in your last sessions — consider an easier week (same weights, 1 set fewer) and extra sleep.`); status = 'warn'; }
   return { status, notes, dip };
@@ -75,14 +75,14 @@ export function coachAnswers(ctx) {
   const strength = strengthAssessment(ctx);
   const rec = recoveryAssessment(ctx);
   const nut = nutritionAssessment(ctx);
-  const sugg = suggestMeals(rem, MEAL_TEMPLATES, ctx.foods, ctx.hour, 1)[0];
   const qa = [];
   qa.push({ q: 'What should I train today?', a: plan.type === 'train' ? `${dayName(plan.dayId)} day${plan.reason === 'catch-up' ? ' — catching up a missed session' : ''}.` : plan.type === 'done' ? `Done: ${dayName(plan.dayId)} completed today. Next: ${dayName(plan.next)}.` : `Rest day. Next session: ${dayName(plan.next)}.` });
   qa.push({ q: 'How much weight should I lift?', a: 'Open Training — each exercise shows today’s weight and why. During calibration, choose a weight that leaves 2–3 reps in reserve.' });
   qa.push({ q: 'Am I becoming stronger?', a: strength.text });
   qa.push({ q: 'Am I eating enough to build muscle?', a: `${nut.text} ${w.text}` });
   qa.push({ q: 'What do I still need today?', a: rem.k > 0 ? `${rem.k} kcal · ${Math.max(0, rem.p)} g protein · ${Math.max(0, rem.c)} g carbs · ${Math.max(0, rem.f)} g fat.` : `Calorie target reached (${-rem.k} kcal over).${rem.p > 0 ? ` Still ${rem.p} g protein to go.` : ''}` });
-  qa.push({ q: 'What should I eat next?', a: sugg ? `${sugg.name}: about ${sugg.tot.k} kcal and ${Math.round(sugg.tot.p)} g protein.` : 'You have covered today’s targets — nothing more needed.' });
+  const v = nutritionVerdict(ctx.tot, S.targets, S.food.some((e) => e.date === today));
+  qa.push({ q: 'Did I reach my nutrition goal today?', a: `${v.title}. ${v.text}` });
   qa.push({ q: 'Am I recovering properly?', a: rec.notes.join(' ') });
   qa.push({ q: 'Am I gaining too fast or too slow?', a: `${w.text} ${calorieAdviceText(adv)}` });
   qa.push({ q: 'Am I on track for the goal?', a: goal.eta ? `At the current rate you reach ${S.profile.targetWeight} kg around ${fmtShort(goal.eta)} ${goal.eta.slice(0, 4)}.` : `Current ${kg(goal.current)} of ${kg(S.profile.targetWeight)}. Not enough trend data to project a date yet — the plan is ${S.profile.planMonths || '6–10'} months.` });

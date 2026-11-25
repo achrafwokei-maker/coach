@@ -343,3 +343,16 @@ test('no personal data in the public code', () => {
 });
 
 test('ymd uses local dates', () => { assert.match(ymd(new Date(2026, 0, 5)), /^2026-01-05$/); });
+
+test('nutrition verdict answers "did I reach my goal?"', async () => {
+  const { nutritionVerdict, macroStatus } = await import('../js/engine.js');
+  const T = { kcal: 2440, protein: 160, carbs: 270, fat: 80 };
+  assert.equal(nutritionVerdict({ k: 0, p: 0 }, T, false).status, 'empty');
+  assert.equal(nutritionVerdict({ k: 2400, p: 155 }, T, true).status, 'done');
+  const todo = nutritionVerdict({ k: 1500, p: 80 }, T, true);
+  assert.equal(todo.status, 'todo');
+  assert.match(todo.text, /940 kcal and 80 g protein/);
+  assert.match(nutritionVerdict({ k: 2400, p: 100 }, T, true).text, /60 g protein/);
+  assert.equal(nutritionVerdict({ k: 3000, p: 170 }, T, true).status, 'over');
+  assert.deepEqual([macroStatus(50, 100), macroStatus(100, 100), macroStatus(130, 100)], ['low', 'ok', 'high']);
+});
