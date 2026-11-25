@@ -10,6 +10,7 @@ import {
 } from './engine.js';
 import { buildContext, coachAnswers, dailyMessage, weeklyReport, calorieAdviceText, focusAdvice } from './coach.js';
 import { icon, ring, bar, lineChart, barChart, STATUS } from './ui.js';
+import { createLiquid } from './liquid.js';
 
 export const APP_VERSION = '1.0.0';
 const $ = (s, el = document) => el.querySelector(s);
@@ -72,6 +73,7 @@ function render() {
   const pg = $('#pages');
   pg.scrollLeft = UI.page * pg.clientWidth;
   if (UI.page === 0) document.body.style.setProperty('--tint', dayColor(trainingDay().dayId)[0]);
+  mountLiquid();
   main.querySelectorAll('.page').forEach((p, i) => { if (old[i]) p.scrollTop = old[i]; });
   document.body.dataset.page = PAGES[UI.page];
   const pagesEls = main.querySelectorAll('.page');
@@ -418,7 +420,7 @@ function trainCount(td) {
 function viewTrainingPage() {
   const td = trainingDay();
   return `<div id="t-head">${trainHead(td)}</div>
-    <div class="seg3 glass" id="seg3"><i class="seg-pill" style="--x:${S.program.rotation.indexOf(td.dayId)}"></i>${S.program.rotation.map((id) => `<button class="${id === td.dayId ? 'on' : ''}" data-act="pick-day" data-v="${id}">${esc(dayLabel(id))}${id === td.suggested && id !== td.dayId ? '<i></i>' : ''}</button>`).join('')}</div>
+    <div class="seg3 glass" id="seg3">${S.program.rotation.map((id) => `<button class="${id === td.dayId ? 'on' : ''}" data-act="pick-day" data-v="${id}">${esc(dayLabel(id))}${id === td.suggested && id !== td.dayId ? '<i></i>' : ''}</button>`).join('')}</div>
     <div id="t-body">${trainBody(td)}</div>
     <div class="page-end"></div>`;
 }
@@ -473,6 +475,15 @@ function trainBody(td) {
     : '<p class="empty-note">Your finished workouts will appear here.</p>'}`;
 }
 
+const isDark = () => { const t = S.settings?.theme || 'dark'; return t === 'dark' || (t === 'system' && matchMedia('(prefers-color-scheme: dark)').matches); };
+function mountLiquid() {
+  UI.liquid?.destroy();
+  const seg = $('#seg3');
+  if (!seg) { UI.liquid = null; return; }
+  const day = trainingDay().dayId;
+  UI.liquid = createLiquid(seg, { items: seg.querySelectorAll('button'), active: S.program.rotation.indexOf(day), tint: dayColor(day)[0], dark: isDark(), sound: true });
+}
+
 // Switch Push / Pull / Legs without rebuilding the page: the pill glides, colours blend, the list slides.
 function switchDay(dayId) {
   const rot = S.program.rotation;
@@ -481,11 +492,11 @@ function switchDay(dayId) {
   haptic();
   UI.trainDay = dayId;
   const td = trainingDay();
-  const seg = $('#seg3'), pill = seg?.querySelector('.seg-pill');
+  const seg = $('#seg3');
   if (!seg) { render(); return; }
   seg.querySelectorAll('button').forEach((b) => b.classList.toggle('on', b.dataset.v === dayId));
-  pill.style.setProperty('--x', to);
-  pill.classList.remove('stretch'); void pill.offsetWidth; pill.classList.add('stretch');
+  UI.liquid?.setActive(to);
+  UI.liquid?.setTint(dayColor(dayId)[0]);
   const pt = main.querySelector('.p-train');
   const [c1, c2] = dayColor(dayId);
   pt.style.setProperty('--tint', c1); pt.style.setProperty('--tint2', c2);
