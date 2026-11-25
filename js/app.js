@@ -66,27 +66,29 @@ function render() {
   if (!S.profile) { main.innerHTML = viewOnboarding(); return; }
   const old = [...main.querySelectorAll('.page')].map((p) => p.scrollTop);
   main.innerHTML = `<div class="pages" id="pages">
-      <section class="page p-train" style="--tint:${dayColor(UI.prevDay || trainingDay().dayId)[0]};--tint2:${dayColor(UI.prevDay || trainingDay().dayId)[1]}">${viewTrainingPage()}</section>
+      <section class="page p-train" style="--tint:${dayColor(trainingDay().dayId)[0]};--tint2:${dayColor(trainingDay().dayId)[1]}">${viewTrainingPage()}</section>
       <section class="page p-meals">${viewMealsPage()}</section>
       <section class="page p-prog">${viewProgressPage()}</section></div>`;
   const pg = $('#pages');
   pg.scrollLeft = UI.page * pg.clientWidth;
-  // Animate the day pill and the red shade from the previous day to the new one.
-  const cur = trainingDay().dayId, pt = main.querySelector('.p-train');
-  requestAnimationFrame(() => requestAnimationFrame(() => {
-    const pill = main.querySelector('.seg-pill');
-    if (pill) pill.style.setProperty('--x', pill.dataset.x);
-    pt.style.setProperty('--tint', dayColor(cur)[0]); pt.style.setProperty('--tint2', dayColor(cur)[1]);
-    if (UI.page === 0) document.body.style.setProperty('--tint', dayColor(cur)[0]);
-  }));
-  UI.prevDay = cur; UI.swapDir = null;
+  if (UI.page === 0) document.body.style.setProperty('--tint', dayColor(trainingDay().dayId)[0]);
   main.querySelectorAll('.page').forEach((p, i) => { if (old[i]) p.scrollTop = old[i]; });
   document.body.dataset.page = PAGES[UI.page];
   const pagesEls = main.querySelectorAll('.page');
   if (UI.enter !== UI.page) { UI.enter = UI.page; const pe = pagesEls[UI.page]; pe.classList.add('enter'); setTimeout(() => pe.classList.remove('enter'), 900); }
   const heads = [...pagesEls].map((p) => p.querySelector('.ph'));
   let raf;
-  const parallax = () => { raf = null; const w = pg.clientWidth; heads.forEach((h, i) => { const o = (pg.scrollLeft - i * w) / w; h.style.transform = `translateX(${o * 60}px)`; h.style.opacity = String(1 - Math.min(1, Math.abs(o)) * 0.6); }); };
+  const parallax = () => {
+    raf = null; const w = pg.clientWidth;
+    pagesEls.forEach((p, i) => {
+      const o = (pg.scrollLeft - i * w) / w, a = Math.min(1, Math.abs(o));
+      // Pages shrink into rounded cards as they slide away, and the title drifts slower than the page.
+      p.style.transform = a > 0.001 ? `scale(${1 - a * 0.06})` : '';
+      p.style.borderRadius = a > 0.001 ? `${Math.round(a * 44)}px` : '';
+      p.style.opacity = String(1 - a * 0.3);
+      const h = heads[i]; if (h) { h.style.transform = `translateX(${o * 70}px)`; h.style.opacity = String(1 - a * 0.7); }
+    });
+  };
   pg.addEventListener('scroll', () => { if (!raf) raf = requestAnimationFrame(parallax); }, { passive: true });
   let t;
   pg.addEventListener('scroll', () => {
@@ -224,6 +226,25 @@ function wheelValues(kind, ex, cur) {
 const PICK_H = 44; // row height of the pop-up wheels (px), must match CSS
 const wheel = (kind, vals, cur) => `<div class="pk-wheel" data-wheel="${kind}" data-val="${cur}"><div class="pk-pad"></div>${vals.map((v) => `<div class="pv" data-v="${v}">${v}</div>`).join('')}<div class="pk-pad"></div></div>`;
 
+// Soft mechanical "tick" like the iPhone picker, synthesised (no audio file). Unlocked on the tap that opens the wheel.
+let actx;
+function tick() {
+  try {
+    if (!actx) return;
+    const t = actx.currentTime;
+    const buf = actx.createBuffer(1, Math.floor(actx.sampleRate * 0.012), actx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let n = 0; n < d.length; n++) d[n] = (Math.random() * 2 - 1) * Math.pow(1 - n / d.length, 6);
+    const src = actx.createBufferSource(); src.buffer = buf;
+    const f = actx.createBiquadFilter(); f.type = 'bandpass'; f.frequency.value = 3200; f.Q.value = 1.4;
+    const g = actx.createGain(); g.gain.setValueAtTime(0.5, t);
+    src.connect(f); f.connect(g); g.connect(actx.destination); src.start(t);
+  } catch { /* audio unavailable */ }
+}
+function unlockAudio() {
+  try { actx ||= new (window.AudioContext || window.webkitAudioContext)(); if (actx.state === 'suspended') actx.resume(); } catch { /* ignore */ }
+}
+
 // Haptic tick. iOS Safari has no vibrate API; toggling a native switch control gives a light tap on iOS 18+.
 let hapticEl;
 function haptic() {
@@ -256,7 +277,7 @@ function initPickWheel(wh, onChange) {
       items[n].classList.toggle('sel', Math.abs(d) < 0.5);
     }
     const k = Math.max(0, Math.min(items.length - 1, Math.round(pos)));
-    if (ready && k !== last) { last = k; haptic(); onChange(+items[k].dataset.v); }
+    if (ready && k !== last) { last = k; haptic(); tick(); onChange(+items[k].dataset.v); }
   };
   // Position on the current value only once laid out; nothing changes until the finger moves it.
   const place = () => { wh.scrollTop = start * PICK_H; paint(); if (Math.round(wh.scrollTop / PICK_H) === start) ready = true; else requestAnimationFrame(place); };
@@ -273,7 +294,7 @@ function openPicker(i, j) {
   const e = S.active.exercises[i], ex = exMap()[e.exId], set = e.sets[j];
   const bw = ex.equip === 'bodyweight';
   UI.pick = { i, j, w0: set.w, r0: set.r };
-  haptic();
+  unlockAudio(); haptic();
   pickerEl.innerHTML = `<div class="pk-back" data-act="pick-done"></div>
     <div class="pk-panel"><div class="pk-head"><span>${esc(ex.name)} · Set ${j + 1}</span><button data-act="pick-done">Done</button></div>
       <div class="pk-wheels ${bw ? 'one' : ''}"><div class="pk-band"></div>
@@ -359,20 +380,60 @@ function trainingDay() {
 const kg = (n) => (n >= 10000 ? `${r1(n / 1000)}t` : `${big(n)} kg`);
 const pctTxt = (x) => `${x > 0 ? '+' : ''}${Math.round(x * 100)}%`;
 
+// Group dated items into Monday-based weeks, newest first, with friendly labels.
+function groupWeeks(items) {
+  const groups = [];
+  const tw = weekStart(today());
+  for (const it of items) {
+    const ws = weekStart(it.date);
+    let g = groups.find((x) => x.ws === ws);
+    if (!g) {
+      const label = ws === tw ? 'This week' : ws === addDays(tw, -7) ? 'Last week' : `${fmtShort(ws)} – ${fmtShort(addDays(ws, 6))}`;
+      g = { ws, label, items: [] }; groups.push(g);
+    }
+    g.items.push(it);
+  }
+  return groups;
+}
+
+// Header for the Training page: "TRAINING", today's date, and a ring with exercises done.
+function trainHead(td) {
+  const day = S.program.days[td.dayId];
+  const { count, total } = trainCount(td);
+  const status = td.state === 'done' ? 'Done ✓' : count ? `${total - count} left` : td.plan.type === 'rest' && td.dayId === td.suggested ? 'Rest day' : 'To do';
+  return `<header class="ph"><div><div class="ph-kicker">${fmtLong(today())}</div><h1 class="ph-title">Training</h1></div>
+    <div class="ph-right"><div class="head-ring" style="--p:${total ? (count / total) * 100 : 0}"><b>${count}<small>/${total}</small></b></div>
+      <span class="head-ring-lbl">${esc(day.name)} · ${status}</span></div>
+    <button class="glass-btn" data-act="open-settings" aria-label="Settings">${icon('gear')}</button></header>`;
+}
+
+function trainCount(td) {
+  const day = S.program.days[td.dayId];
+  const doneW = td.state === 'done' ? td.workout : null;
+  const src = doneW || (td.state === 'active' ? S.active : null);
+  const count = day.exercises.filter((e) => { const l = src?.exercises.find((x) => x.exId === e.id); return l && (l.saved || l.skipped || (doneW && l.sets.some((s) => s.done))); }).length;
+  return { count, total: day.exercises.length };
+}
+
 function viewTrainingPage() {
   const td = trainingDay();
+  return `<div id="t-head">${trainHead(td)}</div>
+    <div class="seg3 glass" id="seg3"><i class="seg-pill" style="--x:${S.program.rotation.indexOf(td.dayId)}"></i>${S.program.rotation.map((id) => `<button class="${id === td.dayId ? 'on' : ''}" data-act="pick-day" data-v="${id}">${esc(dayLabel(id))}${id === td.suggested && id !== td.dayId ? '<i></i>' : ''}</button>`).join('')}</div>
+    <div id="t-body">${trainBody(td)}</div>
+    <div class="page-end"></div>`;
+}
+
+function trainBody(td) {
   const day = S.program.days[td.dayId];
   const doneW = td.state === 'done' ? td.workout : null;
   const loggedOf = (id) => (doneW || (td.state === 'active' ? S.active : null))?.exercises.find((e) => e.exId === id);
   const exs = day.exercises;
   const isDone = (l) => l && (l.saved || (doneW && l.sets.some((s) => s.done)));
-  const count = exs.filter((e) => { const l = loggedOf(e.id); return isDone(l) || l?.skipped; }).length;
-  const kicker = td.state === 'done' ? 'Done today ✓' : td.state === 'active' ? 'In progress' : td.dayId === td.suggested ? (td.plan.type === 'rest' ? 'Rest day · next up' : 'Today') : 'Your choice';
+  const { count } = trainCount(td);
   const wk = weekTraining(S.workouts, today());
-  const hist = finishedWorkouts(S.workouts).slice().reverse();
-  return `${head(kicker, esc(day.name))}
-    <div class="seg3 glass"><i class="seg-pill" style="--x:${S.program.rotation.indexOf(UI.prevDay || td.dayId)}" data-x="${S.program.rotation.indexOf(td.dayId)}"></i>${S.program.rotation.map((id) => `<button class="${id === td.dayId ? 'on' : ''}" data-act="pick-day" data-v="${id}">${esc(dayLabel(id))}${id === td.suggested && id !== td.dayId ? '<i></i>' : ''}</button>`).join('')}</div>
-    <div class="ex-stack ${UI.swapDir ? `swap-${UI.swapDir}` : ''}">${exs.map((e, i) => {
+  const hist = finishedWorkouts(S.workouts).slice().reverse().slice(0, UI.histMore ? 500 : 15);
+  const allCount = finishedWorkouts(S.workouts).length;
+  return `<div class="ex-stack ${UI.swapDir ? `swap-${UI.swapDir}` : ''}">${exs.map((e, i) => {
       const l = loggedOf(e.id);
       const did = isDone(l);
       const rec = recommend(e, exerciseHistory(S.workouts, e.id), today());
@@ -394,19 +455,45 @@ function viewTrainingPage() {
       <div><b class="${wk.change == null ? '' : wk.change >= 0 ? 'pos' : 'neg'}">${wk.change == null ? '—' : pctTxt(wk.change)}</b><span>per session<br>vs last wk</span></div>
       <div><b>${wk.compared ? `${wk.liftsUp}/${wk.compared}` : '—'}</b><span>lifts<br>improved</span></div>
     </div>
-    ${hist.length ? `<div class="h-list">${hist.slice(0, UI.histMore ? 200 : 12).map((w, i) => {
-      const st = workoutStats(w);
-      const prev = previousOfSameDay(S.workouts, w);
-      const ch = prev ? (st.volume - workoutStats(prev).volume) / Math.max(1, workoutStats(prev).volume) : null;
-      const d = parseYmd(w.date);
-      return `<button class="glass h-row" data-act="open-session" data-id="${w.id}" style="--i:${i}">
-        <span class="h-date"><b>${d.getDate()}</b><small>${fmtShort(w.date).split(' ')[1]}</small></span>
-        <span class="h-main"><b>${esc(dayLabel(w.dayId))}</b><small>${st.exercises} exercises · ${st.sets} sets · ${kg(st.volume)}</small></span>
-        ${ch == null ? '<em class="h-delta">1st</em>' : `<em class="h-delta ${ch >= 0 ? 'pos' : 'neg'}">${pctTxt(ch)}</em>`}</button>`;
-    }).join('')}</div>
-    ${hist.length > 12 && !UI.histMore ? `<button class="more-btn" data-act="hist-more">Show all ${hist.length}</button>` : ''}`
-    : '<p class="empty-note">Your finished workouts will appear here.</p>'}
-    <div class="page-end"></div>`;
+    ${hist.length ? `${groupWeeks(hist).map((g) => {
+      const vol = g.items.reduce((a, w) => a + workoutStats(w).volume, 0);
+      return `<div class="h-group"><div class="h-ghead"><b>${g.label}</b><span>${g.items.length} session${g.items.length > 1 ? 's' : ''} · ${big(vol)} kg</span></div>
+        <div class="h-list">${g.items.map((w, i) => {
+          const st = workoutStats(w);
+          const prev = previousOfSameDay(S.workouts, w);
+          const ch = prev ? (st.volume - workoutStats(prev).volume) / Math.max(1, workoutStats(prev).volume) : null;
+          const d = parseYmd(w.date);
+          return `<button class="glass h-row" data-act="open-session" data-id="${w.id}" style="--i:${i};--dc:${dayColor(w.dayId)[0]}">
+            <span class="h-date day-dot"><b>${d.getDate()}</b><small>${fmtShort(w.date).split(' ')[1]}</small></span>
+            <span class="h-main"><b>${esc(dayLabel(w.dayId))} <i class="h-wd">${dayName(d.getDay()).slice(0, 3)}</i></b><small>${st.exercises} exercises · ${st.sets} sets · ${big(st.volume)} kg</small></span>
+            ${ch == null ? '<em class="h-delta">1st</em>' : `<em class="h-delta ${ch >= 0 ? 'pos' : 'neg'}">${pctTxt(ch)}</em>`}</button>`;
+        }).join('')}</div></div>`;
+    }).join('')}
+    ${allCount > hist.length ? `<button class="more-btn" data-act="hist-more">Show all ${allCount}</button>` : ''}`
+    : '<p class="empty-note">Your finished workouts will appear here.</p>'}`;
+}
+
+// Switch Push / Pull / Legs without rebuilding the page: the pill glides, colours blend, the list slides.
+function switchDay(dayId) {
+  const rot = S.program.rotation;
+  const from = rot.indexOf(trainingDay().dayId), to = rot.indexOf(dayId);
+  if (from === to) return;
+  haptic();
+  UI.trainDay = dayId;
+  const td = trainingDay();
+  const seg = $('#seg3'), pill = seg?.querySelector('.seg-pill');
+  if (!seg) { render(); return; }
+  seg.querySelectorAll('button').forEach((b) => b.classList.toggle('on', b.dataset.v === dayId));
+  pill.style.setProperty('--x', to);
+  pill.classList.remove('stretch'); void pill.offsetWidth; pill.classList.add('stretch');
+  const pt = main.querySelector('.p-train');
+  const [c1, c2] = dayColor(dayId);
+  pt.style.setProperty('--tint', c1); pt.style.setProperty('--tint2', c2);
+  document.body.style.setProperty('--tint', c1);
+  UI.swapDir = to > from ? 'l' : 'r';
+  $('#t-head').innerHTML = trainHead(td);
+  $('#t-body').innerHTML = trainBody(td);
+  UI.swapDir = null; UI.prevDay = dayId;
 }
 
 function viewSession({ id }) {
@@ -467,11 +554,12 @@ function viewMealsPage() {
     <h2 class="sec-title">History</h2>
     <div class="glass week-card s3"><div><b>${reached7}/${last7.length || 0}</b><span>days goal<br>reached</span></div><div><b>${avg7 == null ? '—' : `${avg7}%`}</b><span>average<br>calories</span></div>
       <div><b>${last7.length ? `${Math.round(last7.reduce((a, d) => a + Math.min(d.proteinPct, 150), 0) / last7.length)}%` : '—'}</b><span>average<br>protein</span></div></div>
-    ${hist.length ? `<div class="h-list">${hist.map((d, i) => { const dt = parseYmd(d.date); return `<button class="glass h-row" data-act="open-day" data-date="${d.date}" style="--i:${i}">
-        <span class="h-date"><b>${dt.getDate()}</b><small>${fmtShort(d.date).split(' ')[1]}</small></span>
+    ${hist.length ? groupWeeks(hist).map((g) => `<div class="h-group"><div class="h-ghead"><b>${g.label}</b><span>${g.items.filter((d) => d.reached).length}/${g.items.length} days reached</span></div>
+      <div class="h-list">${g.items.map((d, i) => { const dt = parseYmd(d.date); return `<button class="glass h-row" data-act="open-day" data-date="${d.date}" style="--i:${i}">
+        <span class="h-date"><b>${dt.getDate()}</b><small>${dayName(dt.getDay()).slice(0, 3)}</small></span>
         <span class="mini-ring ${d.reached ? 'ok' : ''}" style="--p:${Math.min(100, d.kcalPct)}"><b>${d.reached ? icon('check') : `${d.kcalPct}%`}</b></span>
         <span class="h-main"><b>${big(d.k)} kcal</b><small>Protein ${Math.round(d.p)} g · ${d.proteinPct}%</small></span>
-        <em class="h-delta ${d.reached ? 'pos' : ''}">${d.reached ? 'Reached' : d.kcalPct > 110 ? 'Over' : d.kcalPct < 90 ? 'Under' : 'Low protein'}</em></button>`; }).join('')}</div>`
+        <em class="h-delta ${d.reached ? 'pos' : ''}">${d.reached ? 'Reached' : d.kcalPct > 110 ? 'Over' : d.kcalPct < 90 ? 'Under' : 'Low protein'}</em></button>`; }).join('')}</div></div>`).join('')
     : '<p class="empty-note">Each day you log appears here with how close you got.</p>'}
     <div class="page-end"></div>`;
 }
@@ -530,11 +618,13 @@ function viewProgressPage() {
       ${lineChart(ws.map((x) => ({ date: x.date, y: x.weight })), { target: goal.target, unit: ' kg', empty: 'Your weekly weigh-ins draw this chart.' })}</div>
 
     <h2 class="sec-title">History</h2>
-    ${tl.length ? `<div class="h-list">${tl.map((c, i) => { const dt = parseYmd(c.date); return `<button class="glass h-row" data-act="${c.photo ? 'open-compare' : 'noop'}" ${c.photo ? `data-b="${c.photo.id}"` : ''} style="--i:${i}">
-        <span class="h-date"><b>${dt.getDate()}</b><small>${fmtShort(c.date).split(' ')[1]}</small></span>
+    ${tl.length ? [...new Set(tl.map((c) => c.date.slice(0, 7)))].map((m) => { const items = tl.filter((c) => c.date.startsWith(m)); const ws = items.map((c) => c.weight).filter((x) => x != null); const ch = ws.length > 1 ? r1(ws[0] - ws[ws.length - 1]) : null;
+      return `<div class="h-group"><div class="h-ghead"><b>${fmtMonthYear(items[0].date)}</b><span>${items.length} check-in${items.length > 1 ? 's' : ''}${ch != null ? ` · ${ch > 0 ? '+' : ''}${ch} kg` : ''}</span></div>
+      <div class="h-list">${items.map((c, i) => { const dt = parseYmd(c.date); return `<button class="glass h-row" data-act="${c.photo ? 'open-compare' : 'noop'}" ${c.photo ? `data-b="${c.photo.id}"` : ''} style="--i:${i}">
+        <span class="h-date"><b>${dt.getDate()}</b><small>${dayName(dt.getDay()).slice(0, 3)}</small></span>
         ${c.photo ? `<img class="h-thumb" data-photo="${c.photo.id}" alt="">` : `<span class="h-thumb none">${icon('camera')}</span>`}
         <span class="h-main"><b>${c.weight != null ? `${c.weight} kg` : 'Photo'}</b><small>${c.photo ? (c.photo.note ? esc(c.photo.note) : 'Photo') : 'No photo'}</small></span>
-        ${c.change != null ? `<em class="h-delta ${c.change >= 0 ? 'pos' : 'neg'}">${c.change > 0 ? '+' : ''}${c.change} kg</em>` : ''}</button>`; }).join('')}</div>`
+        ${c.change != null ? `<em class="h-delta ${c.change >= 0 ? 'pos' : 'neg'}">${c.change > 0 ? '+' : ''}${c.change} kg</em>` : ''}</button>`; }).join('')}</div></div>`; }).join('')
     : '<p class="empty-note">Each weekly check-in appears here.</p>'}
     <div class="page-end"></div>`;
 }
@@ -1050,12 +1140,7 @@ const actions = {
   },
   'pick-set': (el) => openPicker(+el.dataset.i, +el.dataset.j),
   'pick-done': () => closePicker(),
-  'pick-day': (el) => {
-    const rot = S.program.rotation, from = rot.indexOf(trainingDay().dayId), to = rot.indexOf(el.dataset.v);
-    if (from === to) return;
-    haptic();
-    UI.trainDay = el.dataset.v; UI.swapDir = to > from ? 'l' : 'r'; render();
-  },
+  'pick-day': (el) => switchDay(el.dataset.v),
   'open-session': (el) => openSheet('session', { full: true, id: el.dataset.id }),
   'delete-session': async (el) => { if (!confirm('Delete this workout from your history? This can’t be undone.')) return; await db.del('workouts', el.dataset.id); S.workouts = S.workouts.filter((w) => w.id !== el.dataset.id); closeSheet(); toast('Workout deleted'); },
   'open-day': (el) => openSheet('day', { full: true, date: el.dataset.date }),
