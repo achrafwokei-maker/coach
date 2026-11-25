@@ -66,11 +66,20 @@ function render() {
   if (!S.profile) { main.innerHTML = viewOnboarding(); return; }
   const old = [...main.querySelectorAll('.page')].map((p) => p.scrollTop);
   main.innerHTML = `<div class="pages" id="pages">
-      <section class="page p-train">${viewTrainingPage()}</section>
+      <section class="page p-train" style="--tint:${dayColor(UI.prevDay || trainingDay().dayId)[0]};--tint2:${dayColor(UI.prevDay || trainingDay().dayId)[1]}">${viewTrainingPage()}</section>
       <section class="page p-meals">${viewMealsPage()}</section>
       <section class="page p-prog">${viewProgressPage()}</section></div>`;
   const pg = $('#pages');
   pg.scrollLeft = UI.page * pg.clientWidth;
+  // Animate the day pill and the red shade from the previous day to the new one.
+  const cur = trainingDay().dayId, pt = main.querySelector('.p-train');
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    const pill = main.querySelector('.seg-pill');
+    if (pill) pill.style.setProperty('--x', pill.dataset.x);
+    pt.style.setProperty('--tint', dayColor(cur)[0]); pt.style.setProperty('--tint2', dayColor(cur)[1]);
+    if (UI.page === 0) document.body.style.setProperty('--tint', dayColor(cur)[0]);
+  }));
+  UI.prevDay = cur; UI.swapDir = null;
   main.querySelectorAll('.page').forEach((p, i) => { if (old[i]) p.scrollTop = old[i]; });
   document.body.dataset.page = PAGES[UI.page];
   const pagesEls = main.querySelectorAll('.page');
@@ -86,6 +95,7 @@ function render() {
       const i = Math.round(pg.scrollLeft / pg.clientWidth);
       if (i !== UI.page) {
         UI.page = i; UI.enter = i; document.body.dataset.page = PAGES[i];
+        if (i === 0) document.body.style.setProperty('--tint', dayColor(trainingDay().dayId)[0]); else document.body.style.removeProperty('--tint');
         const pe = pagesEls[i]; pe.classList.add('enter'); setTimeout(() => pe.classList.remove('enter'), 900);
       }
     }, 60);
@@ -105,7 +115,6 @@ function renderSheet() {
   const nb = $('.sheet-body', sheetEl);
   if (nb && same) nb.scrollTop = y;
   loadThumbs(sheetEl);
-  initWheels(sheetEl);
 }
 function openSheet(kind, data = {}) { UI.sheet = { kind, ...data }; sheetEl.dataset.kind = ''; renderSheet(); }
 function closeSheet() {
@@ -172,6 +181,10 @@ async function onboardSave() {
 }
 
 /* ───────────────────────── The three pages ───────────────────────── */
+// Each workout day gets its own shade of red.
+const DAY_COLORS = { push: ['#ff3b30', '#ff7a59'], pull: ['#ff2d6f', '#ff6fa0'], legs: ['#ff6a1f', '#ffa24d'] };
+const dayColor = (id) => DAY_COLORS[id] || DAY_COLORS.push;
+
 const head = (kicker, title) => `<header class="ph"><div><div class="ph-kicker">${kicker}</div><h1 class="ph-title">${title}</h1></div>
   <button class="glass-btn" data-act="open-settings" aria-label="Settings">${icon('gear')}</button></header>`;
 
@@ -198,7 +211,6 @@ function ensureActive(dayId) {
 /* iPhone-style scroll wheels for weight and reps */
 const START_KG = { barbell: 20, smith: 10, dumbbell: 10, machine: 20, plate: 40, cable: 15 };
 const MAX_KG = { barbell: 200, smith: 200, dumbbell: 60, machine: 150, plate: 400, cable: 120 };
-const WH = 40; // wheel row height (px), must match CSS
 function wheelValues(kind, ex, cur) {
   if (kind === 'r') return Array.from({ length: 50 }, (_, k) => k + 1);
   const step = ex.inc > 0 ? ex.inc : 2.5;
@@ -209,46 +221,79 @@ function wheelValues(kind, ex, cur) {
   if (c >= 0 && !vals.includes(c)) { vals.push(c); vals.sort((a, b) => a - b); }
   return vals;
 }
-const wheel = (kind, i, j, vals, cur, label) => `<div class="wheel" data-wheel="${kind}" data-i="${i}" data-j="${j}" data-val="${cur}" aria-label="${label}">
-  <div class="wheel-pad"></div>${vals.map((v) => `<div class="wv" data-v="${v}">${v}</div>`).join('')}<div class="wheel-pad"></div></div>`;
-function initWheels(root) {
-  root.querySelectorAll('.wheel').forEach((wh) => {
-    const items = [...wh.querySelectorAll('.wv')];
-    const start = Math.max(0, items.findIndex((x) => +x.dataset.v === +wh.dataset.val));
-    wh.scrollTop = start * WH;
-    let last = -1;
-    const mark = () => {
-      const k = Math.max(0, Math.min(items.length - 1, Math.round(wh.scrollTop / WH)));
-      if (k !== last) { items.forEach((x, n) => { const d = Math.abs(n - k); x.className = `wv${d === 0 ? ' sel' : d === 1 ? ' n1' : ''}`; }); last = k; }
-      return k;
-    };
-    mark();
-    let t, raf;
-    wh.addEventListener('scroll', () => {
-      if (!raf) raf = requestAnimationFrame(() => { raf = null; mark(); });
-      clearTimeout(t);
-      t = setTimeout(() => {
-        const v = +items[mark()].dataset.v;
-        const set = S.active?.exercises[+wh.dataset.i]?.sets[+wh.dataset.j];
-        if (!set) return;
-        const kind = wh.dataset.wheel, before = +set[kind];
-        set[kind] = v; wh.dataset.val = v;
-        // Changing set 1 carries down to later sets that still had the same value.
-        if (+wh.dataset.j === 0 && before !== v) {
-          const ex = S.active.exercises[+wh.dataset.i];
-          ex.sets.forEach((o, n) => {
-            if (n === 0 || +o[kind] !== before) return;
-            o[kind] = v;
-            const other = root.querySelector(`.wheel[data-wheel="${kind}"][data-i="${wh.dataset.i}"][data-j="${n}"]`);
-            const idx = [...other.querySelectorAll('.wv')].findIndex((x) => +x.dataset.v === v);
-            if (other && idx >= 0) { other.dataset.val = v; other.scrollTo({ top: idx * WH, behavior: 'smooth' }); }
-          });
-        }
-        saveKV('active');
-      }, 110);
-    }, { passive: true });
-    wh.addEventListener('click', (ev) => { const it = ev.target.closest('.wv'); if (it) wh.scrollTo({ top: items.indexOf(it) * WH, behavior: 'smooth' }); });
-  });
+const PICK_H = 44; // row height of the pop-up wheels (px), must match CSS
+const wheel = (kind, vals, cur) => `<div class="pk-wheel" data-wheel="${kind}" data-val="${cur}"><div class="pk-pad"></div>${vals.map((v) => `<div class="pv" data-v="${v}">${v}</div>`).join('')}<div class="pk-pad"></div></div>`;
+
+// Haptic tick. iOS Safari has no vibrate API; toggling a native switch control gives a light tap on iOS 18+.
+let hapticEl;
+function haptic() {
+  try {
+    if (navigator.vibrate) { navigator.vibrate(5); return; }
+    if (!hapticEl) {
+      hapticEl = document.createElement('label');
+      hapticEl.setAttribute('aria-hidden', 'true');
+      hapticEl.style.cssText = 'position:fixed;left:-99px;opacity:0;pointer-events:none';
+      const c = document.createElement('input');
+      c.type = 'checkbox'; c.setAttribute('switch', ''); c.tabIndex = -1;
+      hapticEl.appendChild(c); document.body.appendChild(hapticEl);
+    }
+    hapticEl.click();
+  } catch { /* no haptics available */ }
+}
+
+function initPickWheel(wh, onChange) {
+  const items = [...wh.querySelectorAll('.pv')];
+  const start = Math.max(0, items.findIndex((x) => +x.dataset.v === +wh.dataset.val));
+  let last = start, raf, ready = false;
+  const paint = () => {
+    raf = null;
+    const pos = wh.scrollTop / PICK_H;
+    const lo = Math.max(0, Math.floor(pos) - 4), hi = Math.min(items.length - 1, Math.ceil(pos) + 4);
+    for (let n = lo; n <= hi; n++) {
+      const d = n - pos, ad = Math.min(Math.abs(d), 3);
+      items[n].style.transform = `rotateX(${-d * 22}deg) scale(${1 - ad * 0.07})`;
+      items[n].style.opacity = String(Math.max(0.12, 1 - ad * 0.3));
+      items[n].classList.toggle('sel', Math.abs(d) < 0.5);
+    }
+    const k = Math.max(0, Math.min(items.length - 1, Math.round(pos)));
+    if (ready && k !== last) { last = k; haptic(); onChange(+items[k].dataset.v); }
+  };
+  // Position on the current value only once laid out; nothing changes until the finger moves it.
+  const place = () => { wh.scrollTop = start * PICK_H; paint(); if (Math.round(wh.scrollTop / PICK_H) === start) ready = true; else requestAnimationFrame(place); };
+  requestAnimationFrame(place);
+  wh.addEventListener('scroll', () => { if (!raf) raf = requestAnimationFrame(paint); }, { passive: true });
+  wh.addEventListener('click', (ev) => { const it = ev.target.closest('.pv'); if (it) wh.scrollTo({ top: items.indexOf(it) * PICK_H, behavior: 'smooth' }); });
+}
+
+const pickerEl = document.createElement('div');
+pickerEl.className = 'picker';
+document.body.appendChild(pickerEl);
+
+function openPicker(i, j) {
+  const e = S.active.exercises[i], ex = exMap()[e.exId], set = e.sets[j];
+  const bw = ex.equip === 'bodyweight';
+  UI.pick = { i, j, w0: set.w, r0: set.r };
+  haptic();
+  pickerEl.innerHTML = `<div class="pk-back" data-act="pick-done"></div>
+    <div class="pk-panel"><div class="pk-head"><span>${esc(ex.name)} · Set ${j + 1}</span><button data-act="pick-done">Done</button></div>
+      <div class="pk-wheels ${bw ? 'one' : ''}"><div class="pk-band"></div>
+        ${bw ? '' : `<div class="pk-col">${wheel('w', wheelValues('w', ex, set.w), set.w)}<span class="pk-unit">kg</span></div>`}
+        <div class="pk-col">${wheel('r', wheelValues('r', ex, set.r), set.r)}<span class="pk-unit">reps</span></div></div></div>`;
+  pickerEl.className = 'picker open';
+  pickerEl.querySelectorAll('.pk-wheel').forEach((wh) => initPickWheel(wh, (v) => { set[wh.dataset.wheel] = v; }));
+}
+
+async function closePicker() {
+  if (!UI.pick) return;
+  const { i, j, w0, r0 } = UI.pick;
+  UI.pick = null;
+  const e = S.active.exercises[i];
+  // Changing set 1 carries down to later sets that still had the same value.
+  if (j === 0) e.sets.forEach((o, n) => { if (n === 0) return; if (+o.w === +w0) o.w = e.sets[0].w; if (+o.r === +r0) o.r = e.sets[0].r; });
+  pickerEl.className = 'picker closing';
+  setTimeout(() => { if (!UI.pick) { pickerEl.className = 'picker'; pickerEl.innerHTML = ''; } }, 280);
+  await saveKV('active');
+  renderSheet();
 }
 
 function viewLog({ id }) {
@@ -272,10 +317,9 @@ function viewLog({ id }) {
       <div class="glass target-card s-${rec.status}"><span class="tc-lbl">Today</span><b class="tc-big">${esc(targetText(rec, ex))}</b>
         <span class="tc-why">${esc(shortWhy(rec, ex))}</span>
         ${last ? `<span class="tc-last">Last time · ${last.sets.map((s) => (bw ? `${s.r}` : `${s.w}×${s.r}`)).join(' · ')}</span>` : ''}</div>
-      <div class="log-sets"><div class="ls-h"><span></span>${bw ? '' : `<span>kg <small>${esc(unit.replace(/^kg ?/, ''))}</small></span>`}<span>reps</span></div>
-        ${e.sets.map((s, j) => `<div class="ls-row ${bw ? 'bw' : ''}"><span class="n">${j + 1}</span>
-          ${bw ? '' : `<div class="wheel-wrap">${wheel('w', i, j, wheelValues('w', ex, s.w), s.w, `Weight set ${j + 1}`)}</div>`}
-          <div class="wheel-wrap">${wheel('r', i, j, wheelValues('r', ex, s.r), s.r, `Reps set ${j + 1}`)}</div></div>`).join('')}
+      <div class="log-sets"><div class="ls-hint">${bw ? 'Tap a set to change the reps' : `Tap a set to change it · kg ${esc(unit.replace(/^kg ?/, ''))}`}</div>
+        ${e.sets.map((s, j) => `<button class="set-line" data-act="pick-set" data-i="${i}" data-j="${j}"><span class="n">${j + 1}</span>
+          ${bw ? '' : `<span class="sv"><b>${s.w}</b><small>kg</small></span><span class="sx">×</span>`}<span class="sv"><b>${s.r}</b><small>reps</small></span></button>`).join('')}
         <div class="ls-more"><button data-act="add-set" data-i="${i}">${icon('plus')} Set</button>${e.sets.length > 1 ? `<button data-act="remove-set" data-i="${i}">${icon('minus')} Set</button>` : ''}</div></div>
       <div class="feel"><span>How hard?</span><div class="feel-row">${[['easy', 'Easy'], ['good', 'Good'], ['hard', 'Hard'], ['max', 'Too hard']].map(([k, l]) => `<button class="${e.diff === k ? 'on' : ''}" data-act="set-diff" data-i="${i}" data-v="${k}">${l}</button>`).join('')}</div></div>
       <button class="glass-cta" data-act="save-ex" data-i="${i}">${icon('check')} Done</button>
@@ -327,8 +371,8 @@ function viewTrainingPage() {
   const wk = weekTraining(S.workouts, today());
   const hist = finishedWorkouts(S.workouts).slice().reverse();
   return `${head(kicker, esc(day.name))}
-    <div class="seg3 glass">${S.program.rotation.map((id) => `<button class="${id === td.dayId ? 'on' : ''}" data-act="pick-day" data-v="${id}">${esc(dayLabel(id))}${id === td.suggested && id !== td.dayId ? '<i></i>' : ''}</button>`).join('')}</div>
-    <div class="ex-stack">${exs.map((e, i) => {
+    <div class="seg3 glass"><i class="seg-pill" style="--x:${S.program.rotation.indexOf(UI.prevDay || td.dayId)}" data-x="${S.program.rotation.indexOf(td.dayId)}"></i>${S.program.rotation.map((id) => `<button class="${id === td.dayId ? 'on' : ''}" data-act="pick-day" data-v="${id}">${esc(dayLabel(id))}${id === td.suggested && id !== td.dayId ? '<i></i>' : ''}</button>`).join('')}</div>
+    <div class="ex-stack ${UI.swapDir ? `swap-${UI.swapDir}` : ''}">${exs.map((e, i) => {
       const l = loggedOf(e.id);
       const did = isDone(l);
       const rec = recommend(e, exerciseHistory(S.workouts, e.id), today());
@@ -1004,7 +1048,14 @@ const actions = {
     }
     ensureActive(td.dayId); await saveKV('active'); openSheet('log', { full: true, id: el.dataset.id });
   },
-  'pick-day': (el) => { UI.trainDay = el.dataset.v; UI.enter = 0; render(); },
+  'pick-set': (el) => openPicker(+el.dataset.i, +el.dataset.j),
+  'pick-done': () => closePicker(),
+  'pick-day': (el) => {
+    const rot = S.program.rotation, from = rot.indexOf(trainingDay().dayId), to = rot.indexOf(el.dataset.v);
+    if (from === to) return;
+    haptic();
+    UI.trainDay = el.dataset.v; UI.swapDir = to > from ? 'l' : 'r'; render();
+  },
   'open-session': (el) => openSheet('session', { full: true, id: el.dataset.id }),
   'delete-session': async (el) => { if (!confirm('Delete this workout from your history? This can’t be undone.')) return; await db.del('workouts', el.dataset.id); S.workouts = S.workouts.filter((w) => w.id !== el.dataset.id); closeSheet(); toast('Workout deleted'); },
   'open-day': (el) => openSheet('day', { full: true, date: el.dataset.date }),
@@ -1028,7 +1079,7 @@ const actions = {
   'tab': (el) => { UI.tab = el.dataset.tab; UI.quickMsg = null; main.scrollTop = 0; render(); },
   'undo-add': async () => { if (!UI.lastAdd) return; await db.del('food', UI.lastAdd); S.food = S.food.filter((e) => e.id !== UI.lastAdd); UI.lastAdd = null; UI.quickMsg = null; render(); toast('Removed'); },
   'drop-photo': () => { UI.pendingPhoto = null; UI.quickMsg = null; render(); },
-  'close-sheet': () => closeSheet(),
+  'close-sheet': () => { if (UI.pick) closePicker(); closeSheet(); },
   'onb-save': () => onboardSave(),
   'open-settings': () => openSheet('settings', { full: true }),
   'open-coach': () => openSheet('coach', { full: true }),
