@@ -11,6 +11,7 @@ import {
 import { buildContext, coachAnswers, dailyMessage, weeklyReport, calorieAdviceText, focusAdvice } from './coach.js';
 import { icon, ring, bar, lineChart, barChart, STATUS } from './ui.js';
 import { createLiquid } from './liquid.js';
+import { parseSplitText } from './splitparse.js';
 
 export const APP_VERSION = '1.0.0';
 const $ = (s, el = document) => el.querySelector(s);
@@ -83,14 +84,7 @@ function render() {
   let raf;
   const parallax = () => {
     raf = null; const w = pg.clientWidth;
-    pagesEls.forEach((p, i) => {
-      const o = (pg.scrollLeft - i * w) / w, a = Math.min(1, Math.abs(o));
-      // Pages shrink into rounded cards as they slide away, and the title drifts slower than the page.
-      p.style.transform = a > 0.001 ? `scale(${1 - a * 0.06})` : '';
-      p.style.borderRadius = a > 0.001 ? `${Math.round(a * 44)}px` : '';
-      p.style.opacity = String(1 - a * 0.3);
-      const h = heads[i]; if (h) { h.style.transform = `translateX(${o * 70}px)`; h.style.opacity = String(1 - a * 0.7); }
-    });
+    heads.forEach((h, i) => { if (!h) return; const o = (pg.scrollLeft - i * w) / w; h.style.transform = `translate3d(${o * 60}px,0,0)`; h.style.opacity = String(1 - Math.min(1, Math.abs(o)) * 0.6); });
   };
   pg.addEventListener('scroll', () => { if (!raf) raf = requestAnimationFrame(parallax); }, { passive: true });
   let t;
@@ -101,7 +95,7 @@ function render() {
       if (i !== UI.page) {
         UI.page = i; UI.enter = i; document.body.dataset.page = PAGES[i];
         if (i === 0) document.body.style.setProperty('--tint', dayColor(trainingDay().dayId)[0]); else document.body.style.removeProperty('--tint');
-        const pe = pagesEls[i]; pe.classList.add('enter'); setTimeout(() => pe.classList.remove('enter'), 900);
+
       }
     }, 60);
   }, { passive: true });
@@ -114,7 +108,7 @@ function renderSheet() {
   const same = sheetEl.dataset.kind === UI.sheet.kind;
   const html = SHEETS[UI.sheet.kind](UI.sheet);
   sheetEl.dataset.kind = UI.sheet.kind;
-  sheetEl.className = `sheet open ${UI.sheet.full ? 'full' : ''}`;
+  sheetEl.className = `sheet open ${UI.sheet.full ? 'full' : ''} ${same ? 'static' : ''}`;
   sheetEl.innerHTML = `<div class="sheet-backdrop" data-act="close-sheet"></div><div class="sheet-panel">${html}</div>`;
   document.body.classList.add('locked');
   const nb = $('.sheet-body', sheetEl);
@@ -122,11 +116,12 @@ function renderSheet() {
   loadThumbs(sheetEl);
 }
 function openSheet(kind, data = {}) { UI.sheet = { kind, ...data }; sheetEl.dataset.kind = ''; renderSheet(); }
-function closeSheet() {
-  if (!UI.sheet) { render(); return; }
+function closeSheet(after) {
+  if (!UI.sheet) { (after || render)(); return; }
   const closing = UI.sheet;
+  sheetEl.classList.remove('static');
   sheetEl.classList.add('closing');
-  setTimeout(() => { sheetEl.classList.remove('closing'); if (UI.sheet === closing) { UI.sheet = null; renderSheet(); } render(); }, 230);
+  setTimeout(() => { sheetEl.classList.remove('closing'); if (UI.sheet === closing) { UI.sheet = null; renderSheet(); } (after || render)(); }, 230);
 }
 
 function applyTheme() {
@@ -252,6 +247,17 @@ function tick() {
     src.connect(f); f.connect(g); g.connect(actx.destination); src.start(t);
   } catch { /* audio unavailable */ }
 }
+// Short low "bzz", like the phone's vibration motor.
+function buzz() {
+  try {
+    if (!actx) return;
+    const t = actx.currentTime, o = actx.createOscillator(), f = actx.createBiquadFilter(), g = actx.createGain();
+    o.type = 'square'; o.frequency.setValueAtTime(95, t); o.frequency.linearRampToValueAtTime(70, t + 0.06);
+    f.type = 'lowpass'; f.frequency.value = 380;
+    g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.35, t + 0.006); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.07);
+    o.connect(f); f.connect(g); g.connect(actx.destination); o.start(t); o.stop(t + 0.08);
+  } catch { /* audio unavailable */ }
+}
 function unlockAudio() {
   try { actx ||= new (window.AudioContext || window.webkitAudioContext)(); if (actx.state === 'suspended') actx.resume(); } catch { /* ignore */ }
 }
@@ -325,13 +331,24 @@ async function closePicker() {
   pickerEl.className = 'picker closing';
   setTimeout(() => { if (!UI.pick) { pickerEl.className = 'picker'; pickerEl.innerHTML = ''; } }, 280);
   await saveKV('active');
-  renderSheet();
+  e.sets.forEach((st, n) => {
+    const line = sheetEl.querySelector(`.set-line[data-i="${i}"][data-j="${n}"]`);
+    if (!line) return;
+    const bs = line.querySelectorAll('.sv b');
+    const vals = bs.length === 2 ? [st.w, st.r] : [st.r];
+    bs.forEach((b, k) => { if (b.textContent !== String(vals[k])) { b.textContent = vals[k]; b.classList.remove('bump'); void b.offsetWidth; b.classList.add('bump'); } });
+  });
 }
 
 function viewLog({ id }) {
-  const td = trainingDay();
-  const w = ensureActive(td.dayId);
-  const i = w.exercises.findIndex((e) => e.exId === id);
+  const exDay = exMap()[id]?.dayId || trainingDay().dayId;
+  const w = ensureActive(exDay);
+  let i = w.exercises.findIndex((e) => e.exId === id);
+  if (i < 0) { // e.g. the exercise was added to the programme after the workout started
+    const entry = buildWorkout(exDay).exercises.find((x) => x.exId === id);
+    if (!entry) return '<div class="sheet-body"><p class="empty-note">This exercise is no longer in your programme.</p></div>';
+    w.exercises.push(entry); i = w.exercises.length - 1;
+  }
   const e = w.exercises[i];
   const ex = exMap()[id];
   const rec = recommend(ex, exerciseHistory(S.workouts, id), today());
@@ -433,20 +450,18 @@ function viewTrainingPage() {
   const td = trainingDay();
   return `<div id="t-head">${trainHead(td)}</div>
     <div class="seg3" id="seg3" style="grid-template-columns:repeat(${S.program.rotation.length},1fr)">${S.program.rotation.map((id) => `<button class="${id === td.dayId ? 'on' : ''}" data-act="pick-day" data-v="${id}">${esc(dayLabel(id))}${id === td.suggested && id !== td.dayId ? '<i></i>' : ''}</button>`).join('')}</div>
-    <div id="t-body">${trainBody(td)}</div>
+    <div id="t-list">${trainList(td)}</div>
+    <div id="t-hist">${trainHist()}</div>
     <div class="page-end"></div>`;
 }
 
-function trainBody(td) {
+function trainList(td) {
   const day = S.program.days[td.dayId];
   const doneW = td.state === 'done' ? td.workout : null;
   const loggedOf = (id) => (doneW || (td.state === 'active' ? S.active : null))?.exercises.find((e) => e.exId === id);
   const exs = day.exercises;
   const isDone = (l) => l && (l.saved || (doneW && l.sets.some((s) => s.done)));
   const { count } = trainCount(td);
-  const wk = weekTraining(S.workouts, today());
-  const hist = finishedWorkouts(S.workouts).slice().reverse().slice(0, UI.histMore ? 500 : 15);
-  const allCount = finishedWorkouts(S.workouts).length;
   return `<div class="ex-stack ${UI.swapDir ? `swap-${UI.swapDir}` : ''}">${exs.map((e, i) => {
       const l = loggedOf(e.id);
       const did = isDone(l);
@@ -460,9 +475,14 @@ function trainBody(td) {
           <span>${did ? doneSets.map((s) => (bw ? `${s.r}` : `${+s.w}×${s.r}`)).join(' · ') : l?.skipped ? 'Skipped' : esc(targetText(rec, e))}</span></span>
         ${did || l?.skipped ? '' : badge}</button>`;
     }).join('')}</div>
-    ${td.state === 'active' && count ? `<button class="glass-cta ghost" data-act="finish-now">Finish workout now</button>` : ''}
+    ${td.state === 'active' && count ? `<button class="glass-cta ghost" data-act="finish-now">Finish workout now</button>` : ''}`;
+}
 
-    <h2 class="sec-title">History</h2>
+function trainHist() {
+  const wk = weekTraining(S.workouts, today());
+  const hist = finishedWorkouts(S.workouts).slice().reverse().slice(0, UI.histMore ? 500 : 15);
+  const allCount = finishedWorkouts(S.workouts).length;
+  return `<h2 class="sec-title">History</h2>
     <div class="glass week-card">
       <div><b>${wk.sessions}</b><span>sessions<br>this week</span></div>
       <div><b>${big(wk.volume)}</b><span>kg<br>lifted</span></div>
@@ -493,7 +513,15 @@ function mountLiquid() {
   const seg = $('#seg3');
   if (!seg) { UI.liquid = null; return; }
   const day = trainingDay().dayId;
-  UI.liquid = createLiquid(seg, { items: seg.querySelectorAll('button'), active: S.program.rotation.indexOf(day), tint: dayColor(day)[0], dark: isDark(), sound: true, simple: true });
+  UI.liquid = createLiquid(seg, { items: seg.querySelectorAll('button'), active: S.program.rotation.indexOf(day), tint: dayColor(day)[0], dark: isDark(), sound: false, simple: true });
+}
+
+function refreshTraining(withHistory) {
+  const td = trainingDay();
+  if (!$('#t-list')) { render(); return; }
+  $('#t-head').innerHTML = trainHead(td);
+  $('#t-list').innerHTML = trainList(td);
+  if (withHistory) $('#t-hist').innerHTML = trainHist();
 }
 
 // Switch Push / Pull / Legs without rebuilding the page: the pill glides, colours blend, the list slides.
@@ -513,10 +541,13 @@ function switchDay(dayId) {
   const [c1, c2] = dayColor(dayId);
   pt.style.setProperty('--tint', c1); pt.style.setProperty('--tint2', c2);
   document.body.style.setProperty('--tint', c1);
-  UI.swapDir = to > from ? 'l' : 'r';
-  $('#t-head').innerHTML = trainHead(td);
-  $('#t-body').innerHTML = trainBody(td);
-  UI.swapDir = null; UI.prevDay = dayId;
+  unlockAudio(); buzz();
+  requestAnimationFrame(() => {
+    UI.swapDir = to > from ? 'l' : 'r';
+    $('#t-head').innerHTML = trainHead(td);
+    $('#t-list').innerHTML = trainList(td);
+    UI.swapDir = null; UI.prevDay = dayId;
+  });
 }
 
 function viewSession({ id }) {
@@ -1099,7 +1130,7 @@ function viewSettings() {
 
       <section class="sg"><h3>Training split</h3>
         <div class="glass sg-card split-now"><b>${esc(split)}</b><span>${pr.rotation.map((d) => esc(dayLabel(d))).join(' → ')}</span>
-          <button class="sg-btn" data-act="open-program">${icon('edit')} Edit days & exercises</button></div>
+          <div class="sg-btns"><button class="sg-btn" data-act="open-program">${icon('edit')} Edit days & exercises</button><button class="sg-btn ghost" data-act="open-import">${icon('camera')} Import from a photo</button></div></div>
         <div class="split-list">${Object.entries(SPLITS).map(([k, sp]) => `<button class="glass split-opt ${pr.split === k || (!pr.split && k === 'ppl') ? 'on' : ''}" data-act="pick-split" data-v="${k}"><b>${esc(sp.name)}</b><span>${esc(sp.desc)}</span></button>`).join('')}</div>
         <p class="sg-note">Switching split keeps all your history. You can then rename days, add your own exercises and change sets and reps.</p></section>
 
@@ -1183,10 +1214,37 @@ function viewProgram() {
       <div class="spacer"></div></div>`;
 }
 
+
+/* Import a split from a photo: iPhone Live Text reads the photo on-device; we turn the text into days & exercises. */
+function viewSplitImport() {
+  const st = UI.splitImport ||= { text: '', photo: null, days: null };
+  return `<div class="sheet-head"><button class="glass-btn" data-act="close-sheet" aria-label="Close">${icon('down')}</button><div class="center"><b>Import your split</b><span>From a photo of your programme</span></div><span></span></div>
+    <div class="sheet-body settings">
+      ${st.days ? `
+        <h3 class="sg-h">Found ${st.days.length} day${st.days.length > 1 ? 's' : ''} · ${st.days.reduce((a, d) => a + d.exercises.length, 0)} exercises</h3>
+        ${st.days.map((d) => `<div class="glass sg-card imp-day"><b>${esc(d.name)}</b>${d.warmup.length ? `<span class="imp-sub">Warm-up: ${esc(d.warmup.join(' · '))}</span>` : ''}
+          <ol>${d.exercises.map((e) => `<li><span>${esc(e.name)}</span><em>${e.sets[0] === e.sets[1] ? e.sets[0] : e.sets.join('–')} × ${e.reps[0] === e.reps[1] ? e.reps[0] : e.reps.join('–')}</em></li>`).join('')}</ol>
+          ${d.finisher ? `<span class="imp-sub">Finish: ${esc(d.finisher)}</span>` : ''}</div>`).join('')}
+        <button class="glass-cta" data-act="imp-apply">${icon('check')} Use this split</button>
+        <button class="more-btn" data-act="imp-edit">Fix the text</button>
+        <p class="sg-note">Your workout history is kept. You can rename days and adjust any exercise afterwards.</p>`
+      : `
+        <div class="glass sg-card imp-steps">
+          <div><i>1</i><span><b>Add the photo</b> of your programme.</span></div>
+          <div><i>2</i><span><b>Press and hold the text</b> in the photo → Select All → Copy. Or tap the box below and choose <b>Scan Text</b> to point your camera at the paper.</span></div>
+          <div><i>3</i><span><b>Paste it</b> in the box and tap <b>Read my split</b>.</span></div>
+        </div>
+        <label class="imp-photo ${st.photo ? 'has' : ''}">${st.photo ? `<img src="${st.photo}" alt="Your programme">` : `${icon('camera')}<b>Add a photo of your programme</b>`}<input type="file" accept="image/*" data-in="imp-photo" hidden></label>
+        <textarea id="imp-text" class="imp-text" placeholder="Paste or scan your programme here…&#10;&#10;PUSH DAY&#10;Bench press 3x12&#10;…" data-in="imp-text">${esc(st.text)}</textarea>
+        <button class="glass-cta" data-act="imp-read">Read my split</button>
+        <p class="sg-note">The text is read on your iPhone by Live Text — nothing is uploaded anywhere.</p>`}
+      <div class="spacer"></div></div>`;
+}
+
 const parseRange = (s) => { const m = String(s).match(/(\d+)\s*(?:[-–x]\s*(\d+))?/); if (!m) return null; const a = +m[1], b = m[2] ? +m[2] : a; return [Math.min(a, b), Math.max(a, b)]; };
 
 /* ───────────────────────── Events ───────────────────────── */
-const SHEETS = { session: viewSession, day: viewDay, log: viewLog, workout: viewWorkout, summary: viewSummary, exercise: viewExercise, meal: viewMeal, custom: viewCustomFood, checkin: viewCheckin, compare: viewCompare, coach: viewCoach, refs: viewRefs, settings: viewSettings, program: viewProgram };
+const SHEETS = { splitimport: viewSplitImport, session: viewSession, day: viewDay, log: viewLog, workout: viewWorkout, summary: viewSummary, exercise: viewExercise, meal: viewMeal, custom: viewCustomFood, checkin: viewCheckin, compare: viewCompare, coach: viewCoach, refs: viewRefs, settings: viewSettings, program: viewProgram };
 
 async function setDay(patch) {
   const d = { date: today(), ...(S.days[today()] || {}), ...patch };
@@ -1196,7 +1254,7 @@ async function setDay(patch) {
 const actions = {
   'go-page': (el) => { const pg = $('#pages'); pg.scrollTo({ left: +el.dataset.i * pg.clientWidth, behavior: 'smooth' }); },
   'log-ex': async (el) => {
-    const td = trainingDay();
+    const td = { dayId: exMap()[el.dataset.id]?.dayId || trainingDay().dayId };
     if (S.active && S.active.dayId !== td.dayId) {
       if (S.active.exercises.some((e) => e.saved)) {
         if (!confirm(`Finish ${dayLabel(S.active.dayId)} and start ${dayLabel(td.dayId)}?`)) return;
@@ -1222,11 +1280,10 @@ const actions = {
     e.saved = true; e.skipped = false;
     UI.justDone = e.exId; setTimeout(() => { UI.justDone = null; }, 900);
     await saveKV('active');
-    UI.sheet = null; renderSheet();
-    if (!(await completeIfAllDone())) toast('Saved ✓');
-    render();
+    const finished = await completeIfAllDone();
+    closeSheet(() => { refreshTraining(finished); if (!finished) toast('Saved ✓'); });
   },
-  'skip-ex': async (el) => { const e = S.active.exercises[+el.dataset.i]; e.skipped = true; e.saved = false; await saveKV('active'); UI.sheet = null; renderSheet(); await completeIfAllDone(); render(); },
+  'skip-ex': async (el) => { const e = S.active.exercises[+el.dataset.i]; e.skipped = true; e.saved = false; await saveKV('active'); const fin = await completeIfAllDone(); closeSheet(() => refreshTraining(fin)); },
   'finish-now': async () => { if (!confirm('Finish the workout now? Exercises you didn’t log are skipped.')) return; S.active.exercises.forEach((e) => { if (!e.saved) e.skipped = true; }); await commitWorkout(); render(); },
   'tap-food': async (el) => { const f = allFoods().find((x) => x.id === el.dataset.id); await logItems([{ food: f, grams: +el.dataset.g }], [], f.n); },
   'tab': (el) => { UI.tab = el.dataset.tab; UI.quickMsg = null; main.scrollTop = 0; render(); },
@@ -1306,6 +1363,45 @@ const actions = {
   // settings
   'save-settings': () => saveSettings(),
   'toggle-wd': (el) => { const v = +el.dataset.v; const t = S.program.trainingDays; S.program.trainingDays = t.includes(v) ? t.filter((x) => x !== v) : [...t, v].sort(); el.classList.toggle('on'); },
+  'open-import': () => { readSettingsForm(); UI.splitImport = { text: '', photo: null, days: null }; openSheet('splitimport', { full: true }); },
+  'imp-read': () => {
+    const st = UI.splitImport; st.text = $('#imp-text')?.value || st.text;
+    const days = parseSplitText(st.text);
+    if (!days.length) return toast('No exercises found — check the text has names with sets × reps.');
+    st.days = days; renderSheet();
+  },
+  'imp-edit': () => { UI.splitImport.days = null; renderSheet(); },
+  'imp-apply': async () => {
+    const days = UI.splitImport.days;
+    const known = Object.values(allExercises(S.program));
+    const used = new Set();
+    const rotation = [], dayMap = {};
+    days.forEach((d, i) => {
+      let id = norm(d.name).replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '') || `d${i + 1}`;
+      while (dayMap[id]) id += '_' + (i + 1);
+      rotation.push(id);
+      dayMap[id] = {
+        name: d.name, warmup: d.warmup.length ? d.warmup : ['Warm-up · 5–10 min'], finisher: d.finisher || 'Cardio · 10 min',
+        exercises: d.exercises.map((e) => {
+          // Reuse a known exercise with the same name so its history and progress carry over.
+          const k = known.find((x) => norm(x.name) === norm(e.name) && !used.has(x.id));
+          let eid = k ? k.id : 'x_' + norm(e.name).replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '').slice(0, 24);
+          while (used.has(eid)) eid += '_' + (i + 1);
+          used.add(eid);
+          return { id: eid, name: e.name, equip: e.equip, sets: e.sets, reps: e.reps, muscles: k?.muscles?.length ? k.muscles : e.muscles, inc: k?.inc ?? EQUIP[e.equip].inc, rest: k?.rest ?? (e.equip === 'bodyweight' ? 60 : 90) };
+        }),
+      };
+    });
+    const ids = new Set(Object.values(dayMap).flatMap((d) => d.exercises.map((e) => e.id)));
+    const old = [...Object.values(S.program.days).flatMap((d) => d.exercises), ...(S.program.archived || [])];
+    const seen = new Set();
+    const next = { rotation, days: dayMap, perWeek: Math.min(7, S.program.perWeek || rotation.length), trainingDays: S.program.trainingDays, split: 'custom',
+      archived: old.filter((e) => !ids.has(e.id) && !seen.has(e.id) && seen.add(e.id)) };
+    await settleActiveFor(next);
+    S.program = next; UI.editDay = rotation[0]; UI.trainDay = null; UI.splitImport = null;
+    await saveKV('program');
+    closeSheet(); toast(`Split imported · ${rotation.length} days`);
+  },
   'set-perweek': (el) => { S.program.perWeek = +el.dataset.v; el.parentElement.querySelectorAll('button').forEach((b) => b.classList.toggle('on', b === el)); },
   'calc-targets': () => {
     readSettingsForm();
@@ -1389,6 +1485,7 @@ document.addEventListener('click', (ev) => {
 
 let qTimer;
 const inputs = {
+  'imp-text': (el) => { if (UI.splitImport) UI.splitImport.text = el.value; },
   'ci-weight': (el) => { UI.ciWeight = el.value; },
   'set-w': (el) => { S.active.exercises[+el.dataset.i].sets[+el.dataset.j].w = el.value.replace(',', '.'); saveKV('active'); },
   'set-r': (el) => { S.active.exercises[+el.dataset.i].sets[+el.dataset.j].r = el.value; saveKV('active'); },
@@ -1414,6 +1511,13 @@ const inputs = {
   'pe-muscle': (el) => { const e = S.program.days[UI.editDay].exercises[+el.dataset.i]; e.muscles = el.value ? [el.value, ...(e.muscles || []).filter((m) => m !== el.value)] : []; saveKV('program'); },
 };
 const changes = {
+  'imp-photo': async (el) => {
+    const f = el.files[0]; if (!f) return;
+    const blob = await resizeImage(f, 1800);
+    UI.splitImport.photo = URL.createObjectURL(blob);
+    UI.splitImport.text = $('#imp-text')?.value || UI.splitImport.text;
+    renderSheet();
+  },
   'quick-photo': async (el) => {
     const f = el.files[0]; if (!f) return;
     UI.pendingPhoto = { id: uid(), blob: await resizeImage(f, 1000), thumb: await resizeImage(f, 240) };

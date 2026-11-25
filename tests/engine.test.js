@@ -323,7 +323,7 @@ test('service worker precaches every app file, and all exist', () => {
   const sw = readFileSync(new URL('../sw.js', import.meta.url), 'utf8');
   const files = [...sw.matchAll(/'\.\/([^']*)'/g)].map((m) => m[1]).filter(Boolean);
   for (const f of files) assert.ok(existsSync(new URL('../' + f, import.meta.url)), `missing ${f}`);
-  const jsFiles = ['app', 'db', 'backup', 'util', 'engine', 'coach', 'program', 'foods', 'ui'];
+  const jsFiles = ['app', 'db', 'backup', 'util', 'engine', 'coach', 'program', 'foods', 'ui', 'liquid', 'splitparse'];
   for (const j of jsFiles) assert.ok(files.includes(`js/${j}.js`), `sw missing js/${j}.js`);
   const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
   assert.match(html, /apple-touch-icon/);
@@ -428,4 +428,61 @@ test('after switching split, old workout days do not break the rotation', async 
   assert.equal(nextRotation(ul, ws), 'upper');
   const p = todayPlan(ul, ws, addDays(MON, 3), MON);
   assert.ok(['upper', 'lower'].includes(p.dayId || p.next));
+});
+
+test('reads a split from photo text (the coach programme, as Live Text gives it)', async () => {
+  const { parseSplitText } = await import('../js/splitparse.js');
+  const text = `PUSH DAY
+Warm-up:
+Elliptical: 5–10 minutes
+Mobility and core activation
+Exercises:
+1. Barbell bench press — 2–3 sets × 12 reps
+2. Incline Smith machine press — 2–3 sets × 12 reps
+3. Dumbbell fly — 2–3 sets × 12–15 reps
+4. Overhead triceps extension — 2–3 sets × 12–15 reps
+5. Machine lateral raise — 2–3 sets × 12 reps
+6. Bar triceps extension — 2–3 sets × 12–15 reps
+7. Abs
+Finish:
+Cardio: 10 minutes
+PULL DAY
+Warm-up:
+Elliptical: 5–7 minutes
+Exercises:
+1. Wide-grip lat pulldown — 2–3 sets × 12–15 reps
+2. Close-grip barbell row — 2–3 sets × 12 reps
+3. Face pulls — 2–3 sets × 12–15 reps
+LEGS DAY
+1. Belt squat — 2–3 sets × 12–15 reps
+2. Leg press 3x12
+3. Calf raises 3 x 15`;
+  const days = parseSplitText(text);
+  assert.deepEqual(days.map((d) => d.name), ['Push', 'Pull', 'Legs']);
+  assert.equal(days[0].exercises.length, 7);
+  assert.deepEqual(days[0].exercises[0], { name: 'Barbell bench press', sets: [2, 3], reps: [12, 12], equip: 'barbell', muscles: ['chest', 'triceps', 'shoulders'] });
+  assert.deepEqual(days[0].exercises[2].reps, [12, 15]);
+  assert.equal(days[0].exercises[2].equip, 'dumbbell');
+  assert.equal(days[0].exercises[6].name, 'Abs');
+  assert.equal(days[0].exercises[6].equip, 'bodyweight');
+  assert.equal(days[0].warmup.length, 2);
+  assert.match(days[0].finisher, /Cardio/);
+  assert.deepEqual(days[2].exercises.map((e) => [e.name, e.sets.join('-'), e.reps.join('-')]), [['Belt squat', '2-3', '12-15'], ['Leg press', '3-3', '12-12'], ['Calf raises', '3-3', '15-15']]);
+  assert.equal(days[2].exercises[0].equip, 'plate');
+});
+
+test('reads French and numbered-day programmes', async () => {
+  const { parseSplitText } = await import('../js/splitparse.js');
+  const days = parseSplitText(`Jour 1 - Pectoraux
+Développé couché 4x8-10
+Écarté haltères 3x12
+Jour 2 - Dos
+Tractions 3x8
+Rowing barre 4 x 10`);
+  assert.deepEqual(days.map((d) => d.name), ['Pectoraux', 'Dos']);
+  assert.deepEqual(days[0].exercises[0].sets, [4, 4]);
+  assert.deepEqual(days[0].exercises[0].reps, [8, 10]);
+  assert.equal(days[1].exercises[0].equip, 'bodyweight');
+  assert.equal(parseSplitText('').length, 0);
+  assert.equal(parseSplitText('Squat 5x5\nBench 5x5')[0].name, 'Workout');
 });
