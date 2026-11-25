@@ -428,3 +428,62 @@ export function macroStatus(val, target) {
   const r = val / target;
   return r < 0.9 ? 'low' : r > 1.15 ? 'high' : 'ok';
 }
+
+/* ───────────────────────── History ───────────────────────── */
+
+// Totals of one finished workout: sets done, kg lifted (weight × reps), exercises done.
+export function workoutStats(w) {
+  let sets = 0, volume = 0, exercises = 0, reps = 0;
+  for (const e of w.exercises || []) {
+    const done = (e.sets || []).filter((s) => s.done && +s.r > 0);
+    if (!done.length) continue;
+    exercises++; sets += done.length;
+    for (const s of done) { volume += (+s.w || 0) * +s.r; reps += +s.r; }
+  }
+  return { sets, volume: Math.round(volume), exercises, reps };
+}
+
+// The same workout type done before `w` (for "am I progressing?")
+export function previousOfSameDay(workouts, w) {
+  return finishedWorkouts(workouts).filter((x) => x.dayId === w.dayId && x.id !== w.id && (x.date < w.date || (x.date === w.date && (x.t || 0) < (w.t || 0)))).at(-1) || null;
+}
+
+// Per-exercise comparison with the previous time each exercise was done.
+export function sessionComparison(workouts, w) {
+  const before = finishedWorkouts(workouts).filter((x) => x.id !== w.id && (x.date < w.date || (x.date === w.date && (x.t || 0) < (w.t || 0))));
+  return (w.exercises || []).filter((e) => (e.sets || []).some((s) => s.done && +s.r > 0)).map((e) => {
+    const sets = e.sets.filter((s) => s.done && +s.r > 0).map((s) => ({ w: +s.w || 0, r: +s.r }));
+    const best = Math.max(...sets.map((s) => (s.w ? e1rm(s.w, s.r) : s.r)));
+    const prev = exerciseHistory(before, e.exId).at(-1);
+    const prevBest = prev ? Math.max(...prev.sets.map((s) => (s.w ? e1rm(s.w, s.r) : s.r))) : null;
+    const trend = prevBest == null ? 'new' : best > prevBest * 1.005 ? 'up' : best < prevBest * 0.97 ? 'down' : 'same';
+    return { exId: e.exId, name: e.name, sets, diff: e.diff, trend, prev };
+  });
+}
+
+// "This week" training summary vs last week (Monday-based weeks).
+export function weekTraining(workouts, today) {
+  const ws = weekStart(today), pws = addDays(ws, -7);
+  const fin = finishedWorkouts(workouts);
+  const thisW = fin.filter((w) => w.date >= ws && w.date <= today);
+  const lastW = fin.filter((w) => w.date >= pws && w.date < ws);
+  const vol = (list) => list.reduce((a, w) => a + workoutStats(w).volume, 0);
+  const sets = (list) => list.reduce((a, w) => a + workoutStats(w).sets, 0);
+  let up = 0, compared = 0;
+  for (const w of thisW) for (const c of sessionComparison(workouts, w)) { if (c.trend !== 'new') { compared++; if (c.trend === 'up') up++; } }
+  const v = vol(thisW), pv = vol(lastW);
+  // Compare kg lifted per session, so a half-finished week isn't shown as a drop.
+  const per = thisW.length ? v / thisW.length : null, pper = lastW.length ? pv / lastW.length : null;
+  return { sessions: thisW.length, volume: v, sets: sets(thisW), prevVolume: pv, change: per != null && pper ? (per - pper) / pper : null, liftsUp: up, compared };
+}
+
+// One row per day with food logged: how close to target (percent) and whether the goal was reached.
+export function nutritionHistory(food, targets, today, days = 30) {
+  const from = addDays(today, -(days - 1));
+  return dailyTotals(food, from, today).reverse().map((d) => ({
+    ...d,
+    kcalPct: Math.round((d.k / targets.kcal) * 100),
+    proteinPct: Math.round((d.p / targets.protein) * 100),
+    reached: nutritionVerdict(d, targets, true).status === 'done',
+  }));
+}

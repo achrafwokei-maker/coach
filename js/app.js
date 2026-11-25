@@ -1,12 +1,12 @@
 import * as db from './db.js';
 import { exportAll, importFile, shareJSON } from './backup.js';
-import { ymd, addDays, daysBetween, weekStart, fmtShort, fmtLong, fmtMonthYear, addMonths, uid, esc, r1, norm, byDate, dayName, clamp } from './util.js';
+import { ymd, parseYmd, addDays, daysBetween, weekStart, fmtShort, fmtLong, fmtMonthYear, addMonths, uid, esc, r1, norm, byDate, dayName, clamp } from './util.js';
 const big = (n) => Math.round(n).toLocaleString('en-US');
 import { DEFAULT_PROGRAM, cloneProgram, allExercises, EQUIP } from './program.js';
 import { FOODS, MEAL_TEMPLATES } from './foods.js';
 import {
   exerciseHistory, recommend, personalRecords, prsInWorkout, weeklyVolume, DIFFICULTY, itemFrom, totals,
-  parseFoodText, suggestMeals, nutritionVerdict, macroStatus, weights, goalStatus, calorieAdvice, applyCalorieChange, macroKcal, dailyTotals, finishedWorkouts, e1rm,
+  parseFoodText, suggestMeals, nutritionVerdict, macroStatus, workoutStats, previousOfSameDay, sessionComparison, weekTraining, nutritionHistory, weights, goalStatus, calorieAdvice, applyCalorieChange, macroKcal, dailyTotals, finishedWorkouts, e1rm,
 } from './engine.js';
 import { buildContext, coachAnswers, dailyMessage, weeklyReport, calorieAdviceText, focusAdvice } from './coach.js';
 import { icon, ring, bar, lineChart, barChart, STATUS } from './ui.js';
@@ -23,7 +23,7 @@ const S = {
   profile: null, targets: null, program: null, settings: null, state: null,
   workouts: [], food: [], body: [], photos: [], customFoods: [], meals: [], days: {}, active: null,
 };
-const UI = { page: 0, tab: 'today', sheet: null, timer: null, mealDraft: null, progressEx: null, editDay: 'push', toast: null };
+const UI = { page: 0, enter: -1, tab: 'today', sheet: null, timer: null, mealDraft: null, progressEx: null, editDay: 'push', toast: null };
 
 async function load() {
   S.profile = await db.kvGet('profile', null);
@@ -74,13 +74,20 @@ function render() {
   pg.scrollLeft = UI.page * pg.clientWidth;
   main.querySelectorAll('.page').forEach((p, i) => { if (old[i]) p.scrollTop = old[i]; });
   document.body.dataset.page = PAGES[UI.page];
+  const pagesEls = main.querySelectorAll('.page');
+  if (UI.enter !== UI.page) { UI.enter = UI.page; const pe = pagesEls[UI.page]; pe.classList.add('enter'); setTimeout(() => pe.classList.remove('enter'), 900); }
+  const heads = [...pagesEls].map((p) => p.querySelector('.ph'));
+  let raf;
+  const parallax = () => { raf = null; const w = pg.clientWidth; heads.forEach((h, i) => { const o = (pg.scrollLeft - i * w) / w; h.style.transform = `translateX(${o * 60}px)`; h.style.opacity = String(1 - Math.min(1, Math.abs(o)) * 0.6); }); };
+  pg.addEventListener('scroll', () => { if (!raf) raf = requestAnimationFrame(parallax); }, { passive: true });
   let t;
   pg.addEventListener('scroll', () => {
     clearTimeout(t);
     t = setTimeout(() => {
       const i = Math.round(pg.scrollLeft / pg.clientWidth);
       if (i !== UI.page) {
-        UI.page = i; document.body.dataset.page = PAGES[i];
+        UI.page = i; UI.enter = i; document.body.dataset.page = PAGES[i];
+        const pe = pagesEls[i]; pe.classList.add('enter'); setTimeout(() => pe.classList.remove('enter'), 900);
         main.querySelectorAll('.dots button').forEach((d, k) => d.classList.toggle('on', k === i));
       }
     }, 60);
@@ -102,7 +109,12 @@ function renderSheet() {
   loadThumbs(sheetEl);
 }
 function openSheet(kind, data = {}) { UI.sheet = { kind, ...data }; sheetEl.dataset.kind = ''; renderSheet(); }
-function closeSheet() { UI.sheet = null; renderSheet(); render(); }
+function closeSheet() {
+  if (!UI.sheet) { render(); return; }
+  const closing = UI.sheet;
+  sheetEl.classList.add('closing');
+  setTimeout(() => { sheetEl.classList.remove('closing'); if (UI.sheet === closing) { UI.sheet = null; renderSheet(); } render(); }, 230);
+}
 
 function applyTheme() {
   const t = S.settings?.theme || 'system';
@@ -164,14 +176,6 @@ async function onboardSave() {
 const head = (kicker, title) => `<header class="ph"><div><div class="ph-kicker">${kicker}</div><h1 class="ph-title">${title}</h1></div>
   <button class="glass-btn" data-act="open-settings" aria-label="Settings">${icon('gear')}</button></header>`;
 
-// Which workout the Training page shows: the one in progress, today's, or the next one.
-function trainingDay() {
-  const plan = buildContext(S, today(), hour()).plan;
-  if (S.active) return { plan, dayId: S.active.dayId, state: 'active' };
-  if (plan.type === 'done') return { plan, dayId: plan.dayId, state: 'done', workout: plan.workout };
-  return { plan, dayId: plan.type === 'train' ? plan.dayId : plan.next, state: plan.type === 'train' ? 'today' : 'rest' };
-}
-
 const shortWhy = (rec, ex) => ({
   increase: 'You hit every rep — add weight.',
   maintain: `Same weight — aim for ${rec.reps} reps.`,
@@ -184,37 +188,6 @@ function targetText(rec, ex) {
   if (ex.equip === 'bodyweight') return `${rec.reps || ex.reps[1]} reps`;
   if (rec.weight == null) return 'Find your weight';
   return `${rec.weight} kg × ${rec.reps || ex.reps[1]}`;
-}
-
-function viewTrainingPage() {
-  const td = trainingDay();
-  const day = S.program.days[td.dayId];
-  const map = exMap();
-  const doneW = td.state === 'done' ? td.workout : null;
-  const loggedOf = (id) => (doneW || S.active)?.exercises.find((e) => e.exId === id);
-  const exs = day.exercises;
-  const count = exs.filter((e) => { const l = loggedOf(e.id); return l && (l.saved || l.skipped || (doneW && l.sets.some((s) => s.done))); }).length;
-  const kicker = td.state === 'rest' ? `Rest day · next workout` : td.state === 'done' ? 'Done today ✓' : td.plan.reason === 'catch-up' ? 'Catch-up · today' : `Today · ${fmtLong(today()).split(' ').slice(0, 1)}`;
-  return `${head(kicker, esc(day.name))}
-    <div class="glass t-sum"><div class="ring-sm" style="--p:${(count / exs.length) * 100}"><b>${count}/${exs.length}</b></div>
-      <div><b>${td.state === 'done' ? 'Workout complete' : count ? 'Keep going' : td.state === 'rest' ? 'Rest — or train anyway' : 'Tap an exercise to start'}</b>
-      <span>${td.state === 'done' ? `Next: ${esc(dayLabel(td.plan.next))}` : esc(day.warmup[0])}</span></div></div>
-    <div class="ex-stack">${exs.map((e, i) => {
-      const l = loggedOf(e.id);
-      const did = l && (l.saved || (doneW && l.sets.some((s) => s.done)));
-      const rec = recommend(e, exerciseHistory(S.workouts, e.id), today());
-      const bw = e.equip === 'bodyweight';
-      const doneSets = did ? l.sets.filter((s) => s.done && +s.r > 0) : [];
-      const badge = rec.status === 'increase' && rec.prev ? `<em class="badge up">${icon('up')}+${r1(rec.weight - rec.prev.top)}</em>` : rec.status === 'calibrate' ? '<em class="badge new">New</em>' : rec.status === 'decrease' || rec.status === 'caution' ? `<em class="badge down">${icon('down')}</em>` : '';
-      return `<button class="glass ex-box ${did ? 'done' : ''} ${l?.skipped ? 'skipped' : ''}" data-act="${doneW ? 'open-exercise' : 'log-ex'}" data-id="${e.id}">
-        <span class="ex-check">${did ? icon('check') : String(i + 1).padStart(2, '0')}</span>
-        <span class="ex-main"><b>${esc(e.name)}</b>
-          <span>${did ? doneSets.map((s) => (bw ? `${s.r}` : `${+s.w}×${s.r}`)).join(' · ') : l?.skipped ? 'Skipped' : esc(targetText(rec, e))}</span></span>
-        ${did || l?.skipped ? '' : badge}</button>`;
-    }).join('')}</div>
-    <p class="foot-note">${esc(day.finisher)}</p>
-    ${S.active && count && td.state === 'active' ? `<button class="glass-cta ghost" data-act="finish-now">Finish workout now</button>` : ''}
-    <div class="page-end"></div>`;
 }
 
 /* Exercise logging sheet */
@@ -269,25 +242,114 @@ async function commitWorkout() {
   return rec;
 }
 
+// Which workout the Training page shows. The user can pick Push / Pull / Legs; default is the suggested one.
+function trainingDay() {
+  const plan = buildContext(S, today(), hour()).plan;
+  const suggested = S.active ? S.active.dayId : plan.type === 'done' ? plan.next : plan.type === 'train' ? plan.dayId : plan.next;
+  const dayId = UI.trainDay && S.program.days[UI.trainDay] ? UI.trainDay : S.active ? S.active.dayId : plan.type === 'done' ? plan.dayId : suggested;
+  const workout = finishedWorkouts(S.workouts).filter((w) => w.date === today() && w.dayId === dayId).at(-1) || null;
+  const state = S.active && S.active.dayId === dayId ? 'active' : workout ? 'done' : plan.type === 'rest' && dayId === plan.next ? 'rest' : 'today';
+  return { plan, dayId, state, workout, suggested };
+}
+
+const kg = (n) => (n >= 10000 ? `${r1(n / 1000)}t` : `${big(n)} kg`);
+const pctTxt = (x) => `${x > 0 ? '+' : ''}${Math.round(x * 100)}%`;
+
+function viewTrainingPage() {
+  const td = trainingDay();
+  const day = S.program.days[td.dayId];
+  const doneW = td.state === 'done' ? td.workout : null;
+  const loggedOf = (id) => (doneW || (td.state === 'active' ? S.active : null))?.exercises.find((e) => e.exId === id);
+  const exs = day.exercises;
+  const isDone = (l) => l && (l.saved || (doneW && l.sets.some((s) => s.done)));
+  const count = exs.filter((e) => { const l = loggedOf(e.id); return isDone(l) || l?.skipped; }).length;
+  const kicker = td.state === 'done' ? 'Done today ✓' : td.state === 'active' ? 'In progress' : td.dayId === td.suggested ? (td.plan.type === 'rest' ? 'Rest day · next up' : 'Today') : 'Your choice';
+  const wk = weekTraining(S.workouts, today());
+  const hist = finishedWorkouts(S.workouts).slice().reverse();
+  return `${head(kicker, esc(day.name))}
+    <div class="seg3 glass">${S.program.rotation.map((id) => `<button class="${id === td.dayId ? 'on' : ''}" data-act="pick-day" data-v="${id}">${esc(dayLabel(id))}${id === td.suggested && id !== td.dayId ? '<i></i>' : ''}</button>`).join('')}</div>
+    <div class="glass t-sum"><div class="ring-sm" style="--p:${(count / exs.length) * 100}"><b>${count}/${exs.length}</b></div>
+      <div><b>${td.state === 'done' ? 'Workout complete' : count ? 'Keep going' : 'Tap an exercise to log it'}</b>
+      <span>${td.state === 'done' ? `Next: ${esc(dayLabel(td.plan.next))}` : `Warm-up: ${esc(day.warmup[0])}`}</span></div></div>
+    <div class="ex-stack">${exs.map((e, i) => {
+      const l = loggedOf(e.id);
+      const did = isDone(l);
+      const rec = recommend(e, exerciseHistory(S.workouts, e.id), today());
+      const bw = e.equip === 'bodyweight';
+      const doneSets = did ? l.sets.filter((s) => s.done && +s.r > 0) : [];
+      const badge = rec.status === 'increase' && rec.prev ? `<em class="badge up">${icon('up')}+${r1(rec.weight - rec.prev.top)}</em>` : rec.status === 'calibrate' ? '<em class="badge new">New</em>' : rec.status === 'decrease' || rec.status === 'caution' ? `<em class="badge down">${icon('down')}</em>` : '';
+      return `<button class="glass ex-box ${did ? 'done' : ''} ${l?.skipped ? 'skipped' : ''} ${UI.justDone === e.id ? 'pop' : ''}" data-act="${doneW ? 'open-exercise' : 'log-ex'}" data-id="${e.id}" style="--i:${i}">
+        <span class="ex-check">${did ? icon('check') : String(i + 1).padStart(2, '0')}</span>
+        <span class="ex-main"><b>${esc(e.name)}</b>
+          <span>${did ? doneSets.map((s) => (bw ? `${s.r}` : `${+s.w}×${s.r}`)).join(' · ') : l?.skipped ? 'Skipped' : esc(targetText(rec, e))}</span></span>
+        ${did || l?.skipped ? '' : badge}</button>`;
+    }).join('')}</div>
+    ${td.state === 'active' && count ? `<button class="glass-cta ghost" data-act="finish-now">Finish workout now</button>` : ''}
+
+    <h2 class="sec-title">History</h2>
+    <div class="glass week-card">
+      <div><b>${wk.sessions}</b><span>sessions<br>this week</span></div>
+      <div><b>${big(wk.volume)}</b><span>kg<br>lifted</span></div>
+      <div><b class="${wk.change == null ? '' : wk.change >= 0 ? 'pos' : 'neg'}">${wk.change == null ? '—' : pctTxt(wk.change)}</b><span>per session<br>vs last wk</span></div>
+      <div><b>${wk.compared ? `${wk.liftsUp}/${wk.compared}` : '—'}</b><span>lifts<br>improved</span></div>
+    </div>
+    ${hist.length ? `<div class="h-list">${hist.slice(0, UI.histMore ? 200 : 12).map((w, i) => {
+      const st = workoutStats(w);
+      const prev = previousOfSameDay(S.workouts, w);
+      const ch = prev ? (st.volume - workoutStats(prev).volume) / Math.max(1, workoutStats(prev).volume) : null;
+      const d = parseYmd(w.date);
+      return `<button class="glass h-row" data-act="open-session" data-id="${w.id}" style="--i:${i}">
+        <span class="h-date"><b>${d.getDate()}</b><small>${fmtShort(w.date).split(' ')[1]}</small></span>
+        <span class="h-main"><b>${esc(dayLabel(w.dayId))}</b><small>${st.exercises} exercises · ${st.sets} sets · ${kg(st.volume)}</small></span>
+        ${ch == null ? '<em class="h-delta">1st</em>' : `<em class="h-delta ${ch >= 0 ? 'pos' : 'neg'}">${pctTxt(ch)}</em>`}</button>`;
+    }).join('')}</div>
+    ${hist.length > 12 && !UI.histMore ? `<button class="more-btn" data-act="hist-more">Show all ${hist.length}</button>` : ''}`
+    : '<p class="empty-note">Your finished workouts will appear here.</p>'}
+    <div class="page-end"></div>`;
+}
+
+function viewSession({ id }) {
+  const w = S.workouts.find((x) => x.id === id);
+  if (!w) return '';
+  const st = workoutStats(w);
+  const prev = previousOfSameDay(S.workouts, w);
+  const ch = prev ? (st.volume - workoutStats(prev).volume) / Math.max(1, workoutStats(prev).volume) : null;
+  const cmp = sessionComparison(S.workouts, w);
+  const mins = w.end && w.t > 1e6 ? Math.round((w.end - w.t) / 60000) : null;
+  const T = { up: ['up', 'Better'], down: ['down', 'Lower'], same: ['eq', 'Same'], new: ['spark', 'First'] };
+  return `<div class="sheet-head"><button class="glass-btn" data-act="close-sheet" aria-label="Close">${icon('down')}</button>
+      <div class="center"><b>${esc(dayLabel(w.dayId))}</b><span>${fmtLong(w.date)}${mins ? ` · ${mins} min` : ''}</span></div><span></span></div>
+    <div class="sheet-body">
+      <div class="glass week-card s3"><div><b>${st.sets}</b><span>sets</span></div><div><b>${kg(st.volume)}</b><span>lifted</span></div>
+        <div><b class="${ch == null ? '' : ch >= 0 ? 'pos' : 'neg'}">${ch == null ? '—' : pctTxt(ch)}</b><span>vs last ${esc(dayLabel(w.dayId))}</span></div></div>
+      ${cmp.map((c, i) => `<div class="glass s-ex" style="--i:${i}"><div class="s-top"><b>${esc(c.name)}</b><em class="trend t-${c.trend}">${icon(T[c.trend][0])}${T[c.trend][1]}</em></div>
+        <div class="s-sets">${c.sets.map((s) => `<span>${s.w ? `${s.w}<small>kg</small>×` : ''}${s.r}</span>`).join('')}</div>
+        ${c.prev ? `<div class="s-prev">Before (${fmtShort(c.prev.date)}): ${c.prev.sets.map((s) => (s.w ? `${s.w}×${s.r}` : s.r)).join(' · ')}</div>` : ''}</div>`).join('')}
+      <button class="more-btn danger" data-act="delete-session" data-id="${w.id}">Delete this workout</button>
+    </div>`;
+}
+
 /* Meals page */
 function viewMealsPage() {
   const T = S.targets;
   const foodToday = S.food.filter((e) => e.date === today()).sort(byDate);
   const tot = totals(foodToday);
   const verdict = nutritionVerdict(tot, T, foodToday.length > 0);
-  const yFood = S.food.filter((e) => e.date === addDays(today(), -1));
-  const yest = yFood.length ? nutritionVerdict(totals(yFood), T, true) : null;
   const left = T.kcal - tot.k;
   const pct = Math.min(100, (tot.k / T.kcal) * 100);
-  const mini = (k, label, val, target) => { const st = macroStatus(val, target); return `<div class="mm ${k} m-${st}"><span>${label}</span><b>${Math.round(val)}<small>/${target}</small></b>${st === 'ok' ? icon('check') : ''}</div>`; };
+  const mini = (k, label, val, target) => { const st = macroStatus(val, target); return `<div class="mm ${k} m-${st}"><span>${label}</span><b>${Math.round(val)}<small>/${target}</small></b><i class="mm-bar"><i style="width:${Math.min(100, (val / target) * 100)}%"></i></i>${st === 'ok' ? icon('check') : ''}</div>`; };
   const tiles = recentFoods().slice(0, 8);
   const quickIds = ['egg', 'chicken_cooked', 'rice_cooked', 'baguette', 'lben', 'dates', 'tuna_water', 'banana'];
-  const pick = tiles.length >= 4 ? tiles.map(({ f, g }) => ({ f, g })) : quickIds.map((id) => allFoods().find((f) => f.id === id)).filter(Boolean).map((f) => ({ f, g: f.u?.[0]?.[1] || 100 }));
+  const pick = [...tiles, ...quickIds.filter((id) => !tiles.some((x) => x.f.id === id)).map((id) => allFoods().find((f) => f.id === id)).filter(Boolean).map((f) => ({ f, g: f.u?.[0]?.[1] || 100 }))];
+  const hist = nutritionHistory(S.food, T, addDays(today(), -1), 30);
+  const last7 = hist.filter((d) => d.date >= addDays(today(), -7));
+  const reached7 = last7.filter((d) => d.reached).length;
+  const avg7 = last7.length ? Math.round(last7.reduce((a, d) => a + Math.min(d.kcalPct, 150), 0) / last7.length) : null;
   return `${head(fmtLong(today()), 'Meals')}
     <div class="glass verdict2 v-${verdict.status}">
       <div class="big-ring" style="--p:${pct}"><div><b>${big(Math.abs(left))}</b><span>${left >= 0 ? 'kcal left' : 'kcal over'}</span></div></div>
       <div class="v2-txt"><b>${verdict.status === 'done' ? 'Goal reached' : verdict.status === 'over' ? 'Over target' : verdict.status === 'empty' ? 'Nothing yet' : 'Not yet'}</b>
-        ${yest ? `<span class="yest2">Yesterday: ${yest.status === 'done' ? '✓ reached' : esc(yest.title.toLowerCase())}</span>` : ''}</div>
+        <span>${big(tot.k)} / ${big(T.kcal)} kcal</span></div>
     </div>
     <div class="mm-row">${mini('p', 'Protein', tot.p, T.protein)}${mini('c', 'Carbs', tot.c, T.carbs)}${mini('f', 'Fat', tot.f, T.fat)}</div>
     <form class="glass quick2" data-form="quick-food">
@@ -296,26 +358,61 @@ function viewMealsPage() {
       <button class="q-add" type="submit" aria-label="Add">${icon('plus')}</button>
     </form>
     ${UI.quickMsg ? `<div class="glass quick-msg ${UI.quickMsg.cls || ''}">${UI.quickMsg.html}</div>` : ''}
-    <div class="tile-row">${pick.map(({ f, g }) => `<button class="glass tile2" data-act="tap-food" data-id="${f.id}" data-g="${g}"><b>${esc(shortName(f.n))}</b><span>${itemFrom(f, g).k} kcal</span></button>`).join('')}</div>
+    <div class="tile-grid">${pick.slice(0, 6).map(({ f, g }) => `<button class="glass tile2" data-act="tap-food" data-id="${f.id}" data-g="${g}"><b>${esc(shortName(f.n))}</b><span>${itemFrom(f, g).k} kcal</span></button>`).join('')}</div>
     ${foodToday.length ? `<div class="glass meal-list">${foodToday.map((e) => `<button class="ml-row" data-act="edit-meal" data-id="${e.id}">
         ${e.photo ? `<img data-photo="${e.photo.id}" alt="">` : `<i>${esc((e.meal || 'M')[0])}</i>`}
         <span><b>${esc(e.items.map((x) => shortName(x.n)).join(', '))}</b><small>${new Date(e.t).toTimeString().slice(0, 5)}</small></span><em>${totals([e]).k}</em></button>`).join('')}</div>` : ''}
+
+    <h2 class="sec-title">History</h2>
+    <div class="glass week-card s3"><div><b>${reached7}/${last7.length || 0}</b><span>days goal<br>reached</span></div><div><b>${avg7 == null ? '—' : `${avg7}%`}</b><span>average<br>calories</span></div>
+      <div><b>${last7.length ? `${Math.round(last7.reduce((a, d) => a + Math.min(d.proteinPct, 150), 0) / last7.length)}%` : '—'}</b><span>average<br>protein</span></div></div>
+    ${hist.length ? `<div class="h-list">${hist.map((d, i) => { const dt = parseYmd(d.date); return `<button class="glass h-row" data-act="open-day" data-date="${d.date}" style="--i:${i}">
+        <span class="h-date"><b>${dt.getDate()}</b><small>${fmtShort(d.date).split(' ')[1]}</small></span>
+        <span class="mini-ring ${d.reached ? 'ok' : ''}" style="--p:${Math.min(100, d.kcalPct)}"><b>${d.reached ? icon('check') : `${d.kcalPct}%`}</b></span>
+        <span class="h-main"><b>${big(d.k)} kcal</b><small>Protein ${Math.round(d.p)} g · ${d.proteinPct}%</small></span>
+        <em class="h-delta ${d.reached ? 'pos' : ''}">${d.reached ? 'Reached' : d.kcalPct > 110 ? 'Over' : d.kcalPct < 90 ? 'Under' : 'Low protein'}</em></button>`; }).join('')}</div>`
+    : '<p class="empty-note">Each day you log appears here with how close you got.</p>'}
     <div class="page-end"></div>`;
 }
 
+function viewDay({ date }) {
+  const entries = S.food.filter((e) => e.date === date).sort(byDate);
+  const t = totals(entries);
+  const v = nutritionVerdict(t, S.targets, entries.length > 0);
+  const row = (l, val, target, u) => `<div class="d-row"><span>${l}</span><b>${big(val)}<small>/${big(target)} ${u}</small></b><em>${Math.round((val / target) * 100)}%</em></div>`;
+  return `<div class="sheet-head"><button class="glass-btn" data-act="close-sheet" aria-label="Close">${icon('down')}</button>
+      <div class="center"><b>${fmtLong(date)}</b><span>${esc(v.title)}</span></div><span></span></div>
+    <div class="sheet-body">
+      <div class="glass d-sum">${row('Calories', t.k, S.targets.kcal, 'kcal')}${row('Protein', t.p, S.targets.protein, 'g')}${row('Carbs', t.c, S.targets.carbs, 'g')}${row('Fat', t.f, S.targets.fat, 'g')}</div>
+      <div class="glass meal-list">${entries.map((e) => `<button class="ml-row" data-act="edit-meal" data-id="${e.id}">
+        ${e.photo ? `<img data-photo="${e.photo.id}" alt="">` : `<i>${esc((e.meal || 'M')[0])}</i>`}
+        <span><b>${esc(e.items.map((x) => shortName(x.n)).join(', '))}</b><small>${e.t > 1e6 ? new Date(e.t).toTimeString().slice(0, 5) : esc(e.meal || '')}</small></span><em>${totals([e]).k}</em></button>`).join('')}</div>
+    </div>`;
+}
+
 /* Progress page */
+function checkinTimeline() {
+  const dates = [...new Set([...S.body.filter((b) => b.weight > 0).map((b) => b.date), ...S.photos.filter((p) => p.kind === 'progress').map((p) => p.date)])].sort().reverse();
+  return dates.map((date) => {
+    const w = S.body.filter((b) => b.date === date && b.weight > 0).at(-1)?.weight ?? null;
+    const prevW = S.body.filter((b) => b.date < date && b.weight > 0).at(-1)?.weight ?? null;
+    return { date, weight: w, change: w != null && prevW != null ? r1(w - prevW) : null, photo: S.photos.filter((p) => p.date === date && p.kind === 'progress')[0] || null };
+  });
+}
+
 function viewProgressPage() {
   const ctx = buildContext(S, today(), hour());
   const { goal } = ctx;
   const adv = calorieAdvice({ body: S.body, food: S.food, targets: S.targets, today: today(), startDate: ctx.startDate, lastAdjust: S.state.lastAdjust });
   const focus = focusAdvice(ctx);
   const prog = S.photos.filter((p) => p.kind === 'progress');
-  const lastPhoto = prog.at(-1);
+  const lastCheck = [...S.body.filter((b) => b.weight > 0).map((b) => b.date), ...prog.map((p) => p.date)].sort().at(-1);
   const every = S.settings.checkInterval || 7;
-  const daysSince = lastPhoto ? daysBetween(lastPhoto.date, today()) : null;
-  const photoDue = !lastPhoto || daysSince >= every;
+  const since = lastCheck ? daysBetween(lastCheck, today()) : null;
+  const due = !prog.length || since >= every;
   const pct = Math.round(goal.progress * 100);
   const ws = weights(S.body);
+  const tl = checkinTimeline();
   return `${head(`Goal · ${goal.target} kg`, 'Progress')}
     <div class="glass goal2">
       <div class="big-ring g" style="--p:${pct}"><div><b>${r1(goal.current)}</b><span>kg now</span></div></div>
@@ -323,14 +420,45 @@ function viewProgressPage() {
         <em>${goal.eta ? `≈ ${fmtMonthYear(goal.eta)}` : 'Date after 2 weeks'}</em></div>
     </div>
     <div class="ms2">${goal.milestones.map((m) => `<span class="${m.reached ? 'on' : ''}">${m.kg}</span>`).join('')}</div>
-    ${photoDue ? `<button class="glass-cta" data-act="open-checkin">${icon('camera')} ${lastPhoto ? 'Time for this week’s photo' : 'Take your first progress photo'}</button>`
-      : `<div class="glass p-note">${icon('camera')}<span>Next photo in ${every - daysSince} day${every - daysSince === 1 ? '' : 's'}</span><button class="link" data-act="open-checkin">Weigh in</button></div>`}
+    ${due ? `<button class="glass-cta pulse-cta" data-act="open-checkin">${icon('camera')} ${prog.length ? 'Weekly check-in: weight + photo' : 'First check-in: weight + photo'}</button>`
+      : `<div class="glass p-note">${icon('camera')}<span>Next check-in in ${every - since} day${every - since === 1 ? '' : 's'}</span><button class="link" data-act="open-checkin">Now</button></div>`}
     ${prog.length >= 2 ? `<button class="glass duo2" data-act="open-compare"><div><img data-photo="${prog[0].id}" alt=""><span>Start</span></div><div><img data-photo="${prog.at(-1).id}" alt=""><span>${fmtShort(prog.at(-1).date)}</span></div></button>` : ''}
     <div class="glass focus"><span class="eyebrow">Focus this week</span><ul>${focus.map((f) => `<li>${esc(f)}</li>`).join('')}</ul></div>
     ${adv.change ? `<button class="glass-cta" data-act="apply-adjust" data-v="${adv.change}">${adv.change > 0 ? 'Eat' : 'Cut'} ${Math.abs(adv.change)} kcal ${adv.change > 0 ? 'more' : 'less'} per day</button>` : ''}
-    <div class="glass chart-card"><div class="cc-h"><span class="eyebrow">Weight</span><button class="link" data-act="quick-weight">${icon('plus')} Add</button></div>
-      ${lineChart(ws.map((x) => ({ date: x.date, y: x.weight })), { target: goal.target, unit: ' kg', empty: 'Add your weight each week.' })}</div>
+    <div class="glass chart-card"><div class="cc-h"><span class="eyebrow">Weight</span></div>
+      ${lineChart(ws.map((x) => ({ date: x.date, y: x.weight })), { target: goal.target, unit: ' kg', empty: 'Your weekly weigh-ins draw this chart.' })}</div>
+
+    <h2 class="sec-title">History</h2>
+    ${tl.length ? `<div class="h-list">${tl.map((c, i) => { const dt = parseYmd(c.date); return `<button class="glass h-row" data-act="${c.photo ? 'open-compare' : 'noop'}" ${c.photo ? `data-b="${c.photo.id}"` : ''} style="--i:${i}">
+        <span class="h-date"><b>${dt.getDate()}</b><small>${fmtShort(c.date).split(' ')[1]}</small></span>
+        ${c.photo ? `<img class="h-thumb" data-photo="${c.photo.id}" alt="">` : `<span class="h-thumb none">${icon('camera')}</span>`}
+        <span class="h-main"><b>${c.weight != null ? `${c.weight} kg` : 'Photo'}</b><small>${c.photo ? (c.photo.note ? esc(c.photo.note) : 'Photo') : 'No photo'}</small></span>
+        ${c.change != null ? `<em class="h-delta ${c.change >= 0 ? 'pos' : 'neg'}">${c.change > 0 ? '+' : ''}${c.change} kg</em>` : ''}</button>`; }).join('')}</div>`
+    : '<p class="empty-note">Each weekly check-in appears here.</p>'}
     <div class="page-end"></div>`;
+}
+
+function viewCheckin() {
+  const last = weights(S.body).at(-1);
+  const todayPhoto = S.photos.filter((p) => p.date === today() && p.kind === 'progress').at(-1);
+  return `<div class="sheet-head"><button class="glass-btn" data-act="close-sheet" aria-label="Close">${icon('down')}</button>
+      <div class="center"><b>Weekly check-in</b><span>${fmtLong(today())}</span></div><span></span></div>
+    <div class="sheet-body">
+      <div class="glass ci-weight"><span class="tc-lbl">Weight this morning</span>
+        <div class="ci-in"><input id="ci-weight" inputmode="decimal" placeholder="${last ? last.weight : '00.0'}" value="${esc(UI.ciWeight || '')}" data-in="ci-weight"><span>kg</span></div>
+        ${last ? `<small>Last: ${last.weight} kg on ${fmtShort(last.date)}</small>` : ''}</div>
+      <label class="glass ci-photo ${todayPhoto ? 'has' : ''}">${todayPhoto ? `<img data-photo="${todayPhoto.id}" alt="">` : `${icon('camera')}<b>Take your photo</b><small>Same spot, same light, morning</small>`}
+        <input type="file" accept="image/*" data-in="checkin-photo" data-pose="front" hidden></label>
+      <button class="glass-cta" data-act="save-checkin">${icon('check')} Save check-in</button>
+    </div>`;
+}
+
+async function saveCheckin() {
+  const x = parseFloat(($('#ci-weight')?.value || '').replace(',', '.'));
+  const hasPhoto = S.photos.some((p) => p.date === today() && p.kind === 'progress');
+  if (!(x > 30 && x < 250) && !hasPhoto) return toast('Enter your weight or take a photo.');
+  if (x > 30 && x < 250) await addBody({ date: today(), weight: x });
+  closeSheet(); toast('Check-in saved ✓');
 }
 
 function nextTrainingDate() {
@@ -684,29 +812,6 @@ async function addBody(entry) {
   S.body = S.body.filter((b) => b.id !== e.id).concat(e).sort(byDate);
 }
 
-function viewCheckin() {
-  const last = S.body.at(-1) || {};
-  const M = [['waist', 'Waist'], ['chest', 'Chest'], ['arm', 'Arm'], ['shoulder', 'Shoulders'], ['thigh', 'Thigh']];
-  const todays = S.photos.filter((p) => p.date === today() && p.kind === 'progress');
-  return `<div class="sheet-head"><button class="icon-btn" data-act="close-sheet">${icon('x')}</button><div class="center"><b>Progress check-in</b></div><button class="btn primary sm" data-act="save-checkin">Save</button></div>
-    <div class="sheet-body">
-      <label class="field"><span>Morning weight (kg)</span><input id="ci-weight" class="big-input" inputmode="decimal" placeholder="${last.weight || ''}"></label>
-      <div class="eyebrow">Photos</div>
-      <div class="pose-row">${['front', 'side', 'back'].map((pose) => { const p = todays.find((x) => x.pose === pose); return `<label class="pose ${p ? 'has' : ''}">${p ? `<img data-photo="${p.id}" alt="">` : icon('camera')}<span>${pose}</span><input type="file" accept="image/*" data-in="checkin-photo" data-pose="${pose}" hidden></label>`; }).join('')}</div>
-      <div class="card hint small"><b>For comparable photos:</b> same place and light, phone at chest height ~2 m away, relaxed and flexed poses, same time of day — ideally in the morning before training (no pump).</div>
-      <details ${M.some(([k]) => last[k]) ? 'open' : ''}><summary class="eyebrow">Measurements (cm) · optional</summary>
-        <div class="grid2">${M.map(([k, l]) => `<label class="field"><span>${l}</span><input id="ci-${k}" inputmode="decimal" placeholder="${last[k] || ''}"></label>`).join('')}</div>
-        <p class="muted tiny">Waist: at the navel, relaxed, after breathing out. Arm: flexed, widest point. Thigh: midway hip–knee.</p></details>
-    </div>`;
-}
-
-async function saveCheckin() {
-  const v = (id) => { const x = parseFloat(($(`#${id}`)?.value || '').replace(',', '.')); return x > 0 ? x : null; };
-  const e = { date: today(), weight: v('ci-weight'), waist: v('ci-waist'), chest: v('ci-chest'), arm: v('ci-arm'), shoulder: v('ci-shoulder'), thigh: v('ci-thigh') };
-  if (Object.values(e).slice(1).some((x) => x != null)) await addBody(e);
-  closeSheet(); toast('Check-in saved');
-}
-
 function viewCompare({ a, b }) {
   const prog = S.photos.filter((p) => p.kind === 'progress');
   const A = prog.find((p) => p.id === a) || prog[0];
@@ -822,7 +927,7 @@ function viewProgram() {
 const parseRange = (s) => { const m = String(s).match(/(\d+)\s*(?:[-–x]\s*(\d+))?/); if (!m) return null; const a = +m[1], b = m[2] ? +m[2] : a; return [Math.min(a, b), Math.max(a, b)]; };
 
 /* ───────────────────────── Events ───────────────────────── */
-const SHEETS = { log: viewLog, workout: viewWorkout, summary: viewSummary, exercise: viewExercise, meal: viewMeal, custom: viewCustomFood, checkin: viewCheckin, compare: viewCompare, coach: viewCoach, refs: viewRefs, settings: viewSettings, program: viewProgram };
+const SHEETS = { session: viewSession, day: viewDay, log: viewLog, workout: viewWorkout, summary: viewSummary, exercise: viewExercise, meal: viewMeal, custom: viewCustomFood, checkin: viewCheckin, compare: viewCompare, coach: viewCoach, refs: viewRefs, settings: viewSettings, program: viewProgram };
 
 async function setDay(patch) {
   const d = { date: today(), ...(S.days[today()] || {}), ...patch };
@@ -831,13 +936,30 @@ async function setDay(patch) {
 
 const actions = {
   'go-page': (el) => { const pg = $('#pages'); pg.scrollTo({ left: +el.dataset.i * pg.clientWidth, behavior: 'smooth' }); },
-  'log-ex': async (el) => { ensureActive(trainingDay().dayId); await saveKV('active'); openSheet('log', { full: true, id: el.dataset.id }); },
+  'log-ex': async (el) => {
+    const td = trainingDay();
+    if (S.active && S.active.dayId !== td.dayId) {
+      if (S.active.exercises.some((e) => e.saved)) {
+        if (!confirm(`Finish ${dayLabel(S.active.dayId)} and start ${dayLabel(td.dayId)}?`)) return;
+        S.active.exercises.forEach((e) => { if (!e.saved) e.skipped = true; });
+        await commitWorkout();
+      } else S.active = null;
+    }
+    ensureActive(td.dayId); await saveKV('active'); openSheet('log', { full: true, id: el.dataset.id });
+  },
+  'pick-day': (el) => { UI.trainDay = el.dataset.v; UI.enter = 0; render(); },
+  'open-session': (el) => openSheet('session', { full: true, id: el.dataset.id }),
+  'delete-session': async (el) => { if (!confirm('Delete this workout from your history? This can’t be undone.')) return; await db.del('workouts', el.dataset.id); S.workouts = S.workouts.filter((w) => w.id !== el.dataset.id); closeSheet(); toast('Workout deleted'); },
+  'open-day': (el) => openSheet('day', { full: true, date: el.dataset.date }),
+  'hist-more': () => { UI.histMore = true; render(); },
+  'noop': () => {},
   'save-ex': async (el) => {
     const e = S.active.exercises[+el.dataset.i];
     const bw = exMap()[e.exId]?.equip === 'bodyweight';
     e.sets.forEach((s) => { s.done = +s.r > 0 && (bw || +s.w > 0 || s.w === '0'); });
     if (!e.sets.some((s) => s.done)) return toast(bw ? 'Enter your reps first.' : 'Enter weight and reps first.');
     e.saved = true; e.skipped = false;
+    UI.justDone = e.exId; setTimeout(() => { UI.justDone = null; }, 900);
     await saveKV('active');
     UI.sheet = null; renderSheet();
     if (!(await completeIfAllDone())) toast('Saved ✓');
@@ -855,7 +977,7 @@ const actions = {
   'open-coach': () => openSheet('coach', { full: true }),
   'open-refs': () => openSheet('refs', { full: true }),
   'open-program': () => openSheet('program', { full: true }),
-  'open-checkin': () => openSheet('checkin', { full: true }),
+  'open-checkin': () => { UI.ciWeight = ''; openSheet('checkin', { full: true }); },
   'open-compare': (el) => openSheet('compare', { full: true, b: el.dataset.b }),
   'open-exercise': (el) => openSheet('exercise', { full: true, id: el.dataset.id }),
   'start-workout': (el) => startWorkout(el.dataset.day),
@@ -971,6 +1093,7 @@ document.addEventListener('click', (ev) => {
 
 let qTimer;
 const inputs = {
+  'ci-weight': (el) => { UI.ciWeight = el.value; },
   'set-w': (el) => { S.active.exercises[+el.dataset.i].sets[+el.dataset.j].w = el.value.replace(',', '.'); saveKV('active'); },
   'set-r': (el) => { S.active.exercises[+el.dataset.i].sets[+el.dataset.j].r = el.value; saveKV('active'); },
   'meal-q': (el) => {
@@ -1026,7 +1149,7 @@ document.addEventListener('focusin', (ev) => { if (ev.target.matches('.set input
 /* ───────────────────────── Boot ───────────────────────── */
 let lastDay = today();
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && today() !== lastDay) { lastDay = today(); render(); }
+  if (document.visibilityState === 'visible' && today() !== lastDay) { lastDay = today(); UI.trainDay = null; render(); }
 });
 
 async function showStorage() {

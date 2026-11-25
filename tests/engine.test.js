@@ -367,3 +367,27 @@ test('focus advice is short, data-based and never empty', async () => {
   assert.ok(adv.length >= 1 && adv.length <= 3);
   assert.ok(adv.some((a) => /least work/.test(a)), adv.join(' | '));
 });
+
+test('training history: stats, comparison and weekly summary', async () => {
+  const { workoutStats, sessionComparison, weekTraining, previousOfSameDay } = await import('../js/engine.js');
+  const w1 = W(MON, 'push', [E('bench', [[60, 12], [60, 12]]), E('abs_push', [[0, 15], [0, 15]])]);
+  const w2 = W(addDays(MON, 7), 'push', [E('bench', [[62.5, 12], [62.5, 12]]), E('abs_push', [[0, 12]])]);
+  assert.deepEqual(workoutStats(w1), { sets: 4, volume: 1440, exercises: 2, reps: 54 });
+  assert.equal(previousOfSameDay([w1, w2], w2).id, w1.id);
+  const cmp = sessionComparison([w1, w2], w2);
+  assert.equal(cmp.find((c) => c.exId === 'bench').trend, 'up');
+  assert.equal(cmp.find((c) => c.exId === 'abs_push').trend, 'down');
+  const wk = weekTraining([w1, w2], addDays(MON, 8));
+  assert.equal(wk.sessions, 1);
+  assert.equal(wk.volume, 1500);
+  assert.ok(Math.abs(wk.change - (1500 - 1440) / 1440) < 1e-9);
+  assert.equal(wk.liftsUp, 1);
+});
+
+test('nutrition history gives a percentage and reached flag per day', async () => {
+  const { nutritionHistory } = await import('../js/engine.js');
+  const food = [{ id: 'a', date: MON, items: [{ k: 2440, p: 160, c: 270, f: 80 }] }, { id: 'b', date: addDays(MON, 1), items: [{ k: 1220, p: 80, c: 100, f: 30 }] }];
+  const h = nutritionHistory(food, targets, addDays(MON, 1));
+  assert.equal(h[0].date, addDays(MON, 1));
+  assert.deepEqual([h[0].kcalPct, h[0].reached, h[1].kcalPct, h[1].reached], [50, false, 100, true]);
+});
