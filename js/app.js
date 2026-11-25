@@ -2,11 +2,11 @@ import * as db from './db.js';
 import { exportAll, importFile, shareJSON } from './backup.js';
 import { ymd, parseYmd, addDays, daysBetween, weekStart, fmtShort, fmtLong, fmtMonthYear, addMonths, uid, esc, r1, norm, byDate, dayName, clamp } from './util.js';
 const big = (n) => Math.round(n).toLocaleString('en-US');
-import { DEFAULT_PROGRAM, cloneProgram, allExercises, EQUIP } from './program.js';
+import { DEFAULT_PROGRAM, cloneProgram, allExercises, EQUIP, SPLITS, applySplit, MUSCLES } from './program.js';
 import { FOODS, MEAL_TEMPLATES } from './foods.js';
 import {
   exerciseHistory, recommend, personalRecords, prsInWorkout, weeklyVolume, DIFFICULTY, itemFrom, totals,
-  parseFoodText, suggestMeals, nutritionVerdict, macroStatus, workoutStats, previousOfSameDay, sessionComparison, weekTraining, nutritionHistory, weights, goalStatus, calorieAdvice, applyCalorieChange, macroKcal, dailyTotals, finishedWorkouts, e1rm,
+  parseFoodText, suggestMeals, suggestTargets, currentWeight, nutritionVerdict, macroStatus, workoutStats, previousOfSameDay, sessionComparison, weekTraining, nutritionHistory, weights, goalStatus, calorieAdvice, applyCalorieChange, macroKcal, dailyTotals, finishedWorkouts, e1rm,
 } from './engine.js';
 import { buildContext, coachAnswers, dailyMessage, weeklyReport, calorieAdviceText, focusAdvice } from './coach.js';
 import { icon, ring, bar, lineChart, barChart, STATUS } from './ui.js';
@@ -40,6 +40,7 @@ async function load() {
   S.customFoods = await db.all('customFoods');
   S.meals = await db.all('meals');
   S.days = Object.fromEntries((await db.all('days')).map((d) => [d.date, d]));
+  if (S.active && !S.program.days[S.active.dayId]) { S.active = null; await db.kvSet('active', null); }
   if (S.active && S.active.date !== ymd()) {
     if (S.active.exercises.some((e) => e.saved && e.sets.some((x) => x.done))) { S.active.exercises.forEach((e) => { if (!e.saved) e.skipped = true; }); await commitWorkout(); }
     else { S.active = null; await db.kvSet('active', null); }
@@ -51,7 +52,7 @@ const today = () => ymd();
 const hour = () => new Date().getHours();
 const allFoods = () => [...S.customFoods, ...FOODS];
 const exMap = () => allExercises(S.program);
-const dayLabel = (id) => S.program.days[id]?.name || id;
+const dayLabel = (id) => S.program.days[id]?.name || (/^d_/.test(id) ? 'Workout' : String(id).replace(/_/g, ' ').replace(/^./, (c) => c.toUpperCase()));
 
 function toast(msg) {
   const t = $('#toast');
@@ -167,8 +168,11 @@ function viewOnboarding() {
         <label class="field"><span>Height (cm)</span><input id="o-height" inputmode="decimal"></label>
         <label class="field"><span>Weight now (kg)</span><input id="o-weight" inputmode="decimal"></label>
         <label class="field"><span>Target weight (kg)</span><input id="o-target" inputmode="decimal"></label>
-        <label class="field"><span>Creatine (g/day)</span><input id="o-creat" inputmode="decimal" value="5"></label>
+        <label class="field"><span>Sex</span><select id="o-sex"><option value="male">Male</option><option value="female">Female</option></select></label>
       </div>
+      <h3 class="onb-h">Your training split</h3>
+      <div class="onb-splits">${Object.entries(SPLITS).map(([k, sp], i) => `<label class="onb-split"><input type="radio" name="o-split" value="${k}" ${i === 0 ? 'checked' : ''}><b>${esc(sp.name)}</b><span>${esc(sp.desc)}</span></label>`).join('')}</div>
+      <p class="muted tiny">You can rename days, add your own exercises and change everything later in Settings.</p>
       <button class="btn primary block" data-act="onb-save">Start</button>
     </div></section>`;
 }
@@ -177,8 +181,11 @@ async function onboardSave() {
   const v = (id) => $(`#${id}`).value.trim();
   const w = parseFloat(v('o-weight')), t = parseFloat(v('o-target'));
   if (!(w > 30) || !(t > 30)) return toast('Enter your current and target weight.');
-  S.profile = { name: v('o-name'), age: +v('o-age') || null, height: +v('o-height') || null, startWeight: w, targetWeight: t, creatine: +v('o-creat') || 5, planMonths: 8, startDate: today() };
+  S.profile = { name: v('o-name'), sex: v('o-sex'), age: +v('o-age') || null, height: +v('o-height') || null, startWeight: w, targetWeight: t, creatine: 5, planMonths: 8, startDate: today() };
   S.state.startDate = today();
+  S.program = applySplit(null, document.querySelector('input[name="o-split"]:checked')?.value || 'ppl');
+  const sug = suggestTargets({ weight: w, height: S.profile.height, age: S.profile.age, sex: S.profile.sex, targetWeight: t });
+  if (sug) S.targets = { ...S.targets, ...sug };
   await saveKV('profile'); await saveKV('state'); await saveKV('targets'); await saveKV('program');
   await addBody({ date: today(), weight: w });
   render();
@@ -187,10 +194,12 @@ async function onboardSave() {
 /* ───────────────────────── The three pages ───────────────────────── */
 // Each workout day gets its own shade of red.
 const DAY_COLORS = { push: ['#ff3b30', '#ff7a59'], pull: ['#ff2d6f', '#ff6fa0'], legs: ['#ff6a1f', '#ffa24d'] };
-const dayColor = (id) => DAY_COLORS[id] || DAY_COLORS.push;
+const PALETTE = [['#ff3b30', '#ff7a59'], ['#ff2d6f', '#ff6fa0'], ['#ff6a1f', '#ffa24d'], ['#e8364f', '#ff7d8c'], ['#ff8a3d', '#ffc074'], ['#d6336c', '#f783ac']];
+const dayColor = (id) => DAY_COLORS[id] || PALETTE[Math.max(0, S.program?.rotation.indexOf(id)) % PALETTE.length];
 
-const head = (kicker, title) => `<header class="ph"><div><div class="ph-kicker">${kicker}</div><h1 class="ph-title">${title}</h1></div>
-  <button class="glass-btn" data-act="open-settings" aria-label="Settings">${icon('gear')}</button></header>`;
+const head = (kicker, title, extra = '') => `<header class="ph"><div class="ph-top"><span class="ph-kicker">${kicker}</span>
+  <button class="glass-btn sm" data-act="open-settings" aria-label="Settings">${icon('gear')}</button></div>
+  <h1 class="ph-title">${title}</h1>${extra}</header>`;
 
 const shortWhy = (rec, ex) => ({
   increase: 'You hit every rep — add weight.',
@@ -372,8 +381,13 @@ async function commitWorkout() {
 // Which workout the Training page shows. The user can pick Push / Pull / Legs; default is the suggested one.
 function trainingDay() {
   const plan = buildContext(S, today(), hour()).plan;
-  const suggested = S.active ? S.active.dayId : plan.type === 'done' ? plan.next : plan.type === 'train' ? plan.dayId : plan.next;
-  const dayId = UI.trainDay && S.program.days[UI.trainDay] ? UI.trainDay : S.active ? S.active.dayId : plan.type === 'done' ? plan.dayId : suggested;
+  const valid = (id) => !!(id && S.program.days[id]);
+  const first = S.program.rotation[0];
+  // Days can disappear when the split changes; anything unknown falls back to a real day.
+  let suggested = S.active && valid(S.active.dayId) ? S.active.dayId : plan.type === 'done' ? plan.next : plan.type === 'train' ? plan.dayId : plan.next;
+  if (!valid(suggested)) suggested = first;
+  let dayId = valid(UI.trainDay) ? UI.trainDay : S.active && valid(S.active.dayId) ? S.active.dayId : plan.type === 'done' && valid(plan.dayId) ? plan.dayId : suggested;
+  if (!valid(dayId)) dayId = first;
   const workout = finishedWorkouts(S.workouts).filter((w) => w.date === today() && w.dayId === dayId).at(-1) || null;
   const state = S.active && S.active.dayId === dayId ? 'active' : workout ? 'done' : plan.type === 'rest' && dayId === plan.next ? 'rest' : 'today';
   return { plan, dayId, state, workout, suggested };
@@ -402,11 +416,9 @@ function groupWeeks(items) {
 function trainHead(td) {
   const day = S.program.days[td.dayId];
   const { count, total } = trainCount(td);
-  const status = td.state === 'done' ? 'Done ✓' : count ? `${total - count} left` : td.plan.type === 'rest' && td.dayId === td.suggested ? 'Rest day' : 'To do';
-  return `<header class="ph"><div><div class="ph-kicker">${fmtLong(today())}</div><h1 class="ph-title">Training</h1></div>
-    <div class="ph-right"><div class="head-ring" style="--p:${total ? (count / total) * 100 : 0}"><b>${count}<small>/${total}</small></b></div>
-      <span class="head-ring-lbl">${esc(day.name)} · ${status}</span></div>
-    <button class="glass-btn" data-act="open-settings" aria-label="Settings">${icon('gear')}</button></header>`;
+  const status = td.state === 'done' ? 'Complete' : count ? `${total - count} left` : td.plan.type === 'rest' && td.dayId === td.suggested ? 'Rest day' : 'Not started';
+  return head(fmtLong(today()), 'Training', `<div class="th-prog"><div class="th-bar"><i style="width:${total ? (count / total) * 100 : 0}%"></i></div>
+    <span class="th-count"><b>${count}</b>/${total}</span><span class="th-status">${esc(day.name)} · ${status}</span></div>`);
 }
 
 function trainCount(td) {
@@ -420,7 +432,7 @@ function trainCount(td) {
 function viewTrainingPage() {
   const td = trainingDay();
   return `<div id="t-head">${trainHead(td)}</div>
-    <div class="seg3 glass" id="seg3">${S.program.rotation.map((id) => `<button class="${id === td.dayId ? 'on' : ''}" data-act="pick-day" data-v="${id}">${esc(dayLabel(id))}${id === td.suggested && id !== td.dayId ? '<i></i>' : ''}</button>`).join('')}</div>
+    <div class="seg3" id="seg3" style="grid-template-columns:repeat(${S.program.rotation.length},1fr)">${S.program.rotation.map((id) => `<button class="${id === td.dayId ? 'on' : ''}" data-act="pick-day" data-v="${id}">${esc(dayLabel(id))}${id === td.suggested && id !== td.dayId ? '<i></i>' : ''}</button>`).join('')}</div>
     <div id="t-body">${trainBody(td)}</div>
     <div class="page-end"></div>`;
 }
@@ -443,7 +455,7 @@ function trainBody(td) {
       const doneSets = did ? l.sets.filter((s) => s.done && +s.r > 0) : [];
       const badge = rec.status === 'increase' && rec.prev ? `<em class="badge up">${icon('up')}+${r1(rec.weight - rec.prev.top)}</em>` : rec.status === 'calibrate' ? '<em class="badge new">New</em>' : rec.status === 'decrease' || rec.status === 'caution' ? `<em class="badge down">${icon('down')}</em>` : '';
       return `<button class="glass ex-box ${did ? 'done' : ''} ${l?.skipped ? 'skipped' : ''} ${UI.justDone === e.id ? 'pop' : ''}" data-act="${doneW ? 'open-exercise' : 'log-ex'}" data-id="${e.id}" style="--i:${i}">
-        <span class="ex-check">${did ? icon('check') : String(i + 1).padStart(2, '0')}</span>
+        <span class="ex-num">${did ? icon('check') : i + 1}</span>
         <span class="ex-main"><b>${esc(e.name)}</b>
           <span>${did ? doneSets.map((s) => (bw ? `${s.r}` : `${+s.w}×${s.r}`)).join(' · ') : l?.skipped ? 'Skipped' : esc(targetText(rec, e))}</span></span>
         ${did || l?.skipped ? '' : badge}</button>`;
@@ -466,7 +478,7 @@ function trainBody(td) {
           const ch = prev ? (st.volume - workoutStats(prev).volume) / Math.max(1, workoutStats(prev).volume) : null;
           const d = parseYmd(w.date);
           return `<button class="glass h-row" data-act="open-session" data-id="${w.id}" style="--i:${i};--dc:${dayColor(w.dayId)[0]}">
-            <span class="h-date day-dot"><b>${d.getDate()}</b><small>${fmtShort(w.date).split(' ')[1]}</small></span>
+            <span class="h-date plain"><b>${d.getDate()}</b><small>${fmtShort(w.date).split(' ')[1]}</small></span>
             <span class="h-main"><b>${esc(dayLabel(w.dayId))} <i class="h-wd">${dayName(d.getDay()).slice(0, 3)}</i></b><small>${st.exercises} exercises · ${st.sets} sets · ${big(st.volume)} kg</small></span>
             ${ch == null ? '<em class="h-delta">1st</em>' : `<em class="h-delta ${ch >= 0 ? 'pos' : 'neg'}">${pctTxt(ch)}</em>`}</button>`;
         }).join('')}</div></div>`;
@@ -481,7 +493,7 @@ function mountLiquid() {
   const seg = $('#seg3');
   if (!seg) { UI.liquid = null; return; }
   const day = trainingDay().dayId;
-  UI.liquid = createLiquid(seg, { items: seg.querySelectorAll('button'), active: S.program.rotation.indexOf(day), tint: dayColor(day)[0], dark: isDark(), sound: true });
+  UI.liquid = createLiquid(seg, { items: seg.querySelectorAll('button'), active: S.program.rotation.indexOf(day), tint: dayColor(day)[0], dark: isDark(), sound: true, simple: true });
 }
 
 // Switch Push / Pull / Legs without rebuilding the page: the pill glides, colours blend, the list slides.
@@ -567,7 +579,7 @@ function viewMealsPage() {
       <div><b>${last7.length ? `${Math.round(last7.reduce((a, d) => a + Math.min(d.proteinPct, 150), 0) / last7.length)}%` : '—'}</b><span>average<br>protein</span></div></div>
     ${hist.length ? groupWeeks(hist).map((g) => `<div class="h-group"><div class="h-ghead"><b>${g.label}</b><span>${g.items.filter((d) => d.reached).length}/${g.items.length} days reached</span></div>
       <div class="h-list">${g.items.map((d, i) => { const dt = parseYmd(d.date); return `<button class="glass h-row" data-act="open-day" data-date="${d.date}" style="--i:${i}">
-        <span class="h-date"><b>${dt.getDate()}</b><small>${dayName(dt.getDay()).slice(0, 3)}</small></span>
+        <span class="h-date plain"><b>${dt.getDate()}</b><small>${dayName(dt.getDay()).slice(0, 3)}</small></span>
         <span class="mini-ring ${d.reached ? 'ok' : ''}" style="--p:${Math.min(100, d.kcalPct)}"><b>${d.reached ? icon('check') : `${d.kcalPct}%`}</b></span>
         <span class="h-main"><b>${big(d.k)} kcal</b><small>Protein ${Math.round(d.p)} g · ${d.proteinPct}%</small></span>
         <em class="h-delta ${d.reached ? 'pos' : ''}">${d.reached ? 'Reached' : d.kcalPct > 110 ? 'Over' : d.kcalPct < 90 ? 'Under' : 'Low protein'}</em></button>`; }).join('')}</div></div>`).join('')
@@ -632,7 +644,7 @@ function viewProgressPage() {
     ${tl.length ? [...new Set(tl.map((c) => c.date.slice(0, 7)))].map((m) => { const items = tl.filter((c) => c.date.startsWith(m)); const ws = items.map((c) => c.weight).filter((x) => x != null); const ch = ws.length > 1 ? r1(ws[0] - ws[ws.length - 1]) : null;
       return `<div class="h-group"><div class="h-ghead"><b>${fmtMonthYear(items[0].date)}</b><span>${items.length} check-in${items.length > 1 ? 's' : ''}${ch != null ? ` · ${ch > 0 ? '+' : ''}${ch} kg` : ''}</span></div>
       <div class="h-list">${items.map((c, i) => { const dt = parseYmd(c.date); return `<button class="glass h-row" data-act="${c.photo ? 'open-compare' : 'noop'}" ${c.photo ? `data-b="${c.photo.id}"` : ''} style="--i:${i}">
-        <span class="h-date"><b>${dt.getDate()}</b><small>${dayName(dt.getDay()).slice(0, 3)}</small></span>
+        <span class="h-date plain"><b>${dt.getDate()}</b><small>${dayName(dt.getDay()).slice(0, 3)}</small></span>
         ${c.photo ? `<img class="h-thumb" data-photo="${c.photo.id}" alt="">` : `<span class="h-thumb none">${icon('camera')}</span>`}
         <span class="h-main"><b>${c.weight != null ? `${c.weight} kg` : 'Photo'}</b><small>${c.photo ? (c.photo.note ? esc(c.photo.note) : 'Photo') : 'No photo'}</small></span>
         ${c.change != null ? `<em class="h-delta ${c.change >= 0 ? 'pos' : 'neg'}">${c.change > 0 ? '+' : ''}${c.change} kg</em>` : ''}</button>`; }).join('')}</div></div>`; }).join('')
@@ -1061,68 +1073,113 @@ function viewRefs() {
 
 /* ───────────────────────── Settings & programme editor ───────────────────────── */
 function viewSettings() {
-  const p = S.profile, t = S.targets;
+  const p = S.profile, t = S.targets, pr = S.program;
   const calc = macroKcal(t);
-  const field = (id, label, val, mode = 'decimal') => `<label class="field"><span>${label}</span><input id="${id}" inputmode="${mode}" value="${val ?? ''}"></label>`;
-  return `<div class="sheet-head"><button class="icon-btn" data-act="close-sheet">${icon('x')}</button><div class="center"><b>Settings</b></div><button class="btn primary sm" data-act="save-settings">Save</button></div>
-    <div class="sheet-body">
-      <div class="eyebrow">Profile</div>
-      <div class="grid2">${field('s-name', 'First name', esc(p.name), 'text')}${field('s-age', 'Age', p.age, 'numeric')}${field('s-height', 'Height (cm)', p.height)}${field('s-start', 'Start weight (kg)', p.startWeight)}
-      ${field('s-target', 'Target weight (kg)', p.targetWeight)}${field('s-months', 'Plan length (months)', p.planMonths || 8, 'numeric')}${field('s-creat', 'Creatine (g/day)', p.creatine || 5)}
-      <label class="field"><span>Start date</span><input id="s-startdate" type="date" value="${S.state.startDate || ''}"></label></div>
-      <div class="eyebrow">Daily targets</div>
-      <div class="grid2">${field('s-kcal', 'Calories', t.kcal, 'numeric')}${field('s-p', 'Protein (g)', t.protein, 'numeric')}${field('s-c', 'Carbs (g)', t.carbs, 'numeric')}${field('s-f', 'Fat (g)', t.fat, 'numeric')}</div>
-      <p class="muted tiny">Macros add up to ${calc} kcal${Math.abs(calc - t.kcal) > 50 ? ' — different from your calorie target; the coach uses the calorie target.' : '.'} These are provisional starting targets; the coach suggests changes from your trend.</p>
-      <div class="eyebrow">Training days</div>
-      <div class="chips wd">${[1, 2, 3, 4, 5, 6, 0].map((d) => `<button class="chip ${S.program.trainingDays.includes(d) ? 'on' : ''}" data-act="toggle-wd" data-v="${d}">${dayName(d).slice(0, 3)}</button>`).join('')}</div>
-      <p class="muted tiny">Rotation: ${S.program.rotation.map(dayLabel).join(' → ')}. Missed sessions are caught up on the next free day — the rotation never skips a workout.</p>
-      <div class="eyebrow">Preferences</div>
-      <label class="switch-row"><input type="checkbox" id="s-rest" ${S.settings.restTimer ? 'checked' : ''}><span>Automatic rest timer</span></label>
-      <label class="field"><span>Photo & measurement check-in</span><select id="s-interval"><option value="7" ${S.settings.checkInterval == 7 ? 'selected' : ''}>Every 7 days</option><option value="15" ${S.settings.checkInterval == 15 ? 'selected' : ''}>Every 15 days</option></select></label>
-      <label class="field"><span>Appearance</span><select id="s-theme">${['system', 'light', 'dark'].map((x) => `<option ${S.settings.theme === x ? 'selected' : ''}>${x}</option>`).join('')}</select></label>
-      <button class="btn ghost block" data-act="open-program">${icon('edit')} Edit training programme</button>
-      <div class="eyebrow">Your data</div>
-      <p class="muted tiny">Everything is stored only on this iPhone. Make a backup every few weeks and keep it in Files or iCloud Drive.${S.state.lastBackup ? ` Last backup: ${fmtShort(S.state.lastBackup)}.` : ''}</p>
-      <button class="btn ghost block" data-act="backup">Back up everything</button>
-      <label class="btn ghost block">Restore backup / import setup<input type="file" accept="application/json,.json" data-in="import-file" hidden></label>
-      <p class="muted tiny" id="storage-info"></p>
-      <button class="btn ghost block" data-act="open-refs">${icon('book')} The science behind the advice</button>
-      <button class="btn ghost block danger-text" data-act="reset-all">Erase all data</button>
-      <p class="muted tiny center-text">Coach v${APP_VERSION}</p><div class="spacer"></div>
+  const f = (id, label, val, mode = 'decimal', unit = '') => `<label class="sf"><span>${label}</span><div class="sf-in"><input id="${id}" inputmode="${mode}" value="${val ?? ''}" ${mode === 'text' ? 'autocomplete="off"' : ''}>${unit ? `<em>${unit}</em>` : ''}</div></label>`;
+  const split = SPLITS[pr.split] ? SPLITS[pr.split].name : 'Custom split';
+  return `<div class="sheet-head"><button class="glass-btn" data-act="close-sheet" aria-label="Close">${icon('down')}</button><div class="center"><b>Settings</b></div><button class="btn primary sm" data-act="save-settings">Save</button></div>
+    <div class="sheet-body settings">
+      <section class="sg"><h3>Profile</h3><div class="glass sg-card">
+        ${f('s-name', 'Name', esc(p.name), 'text')}
+        <label class="sf"><span>Sex</span><div class="sf-in"><select id="s-sex"><option value="male" ${p.sex !== 'female' ? 'selected' : ''}>Male</option><option value="female" ${p.sex === 'female' ? 'selected' : ''}>Female</option></select></div></label>
+        ${f('s-age', 'Age', p.age, 'numeric', 'years')}${f('s-height', 'Height', p.height, 'decimal', 'cm')}
+      </div></section>
+
+      <section class="sg"><h3>Goal</h3><div class="glass sg-card">
+        ${f('s-start', 'Starting weight', p.startWeight, 'decimal', 'kg')}${f('s-target', 'Target weight', p.targetWeight, 'decimal', 'kg')}
+        ${f('s-months', 'Plan length', p.planMonths || 8, 'numeric', 'months')}
+        <label class="sf"><span>Start date</span><div class="sf-in"><input id="s-startdate" type="date" value="${S.state.startDate || ''}"></div></label>
+      </div></section>
+
+      <section class="sg"><h3>Daily nutrition</h3><div class="glass sg-card">
+        ${f('s-kcal', 'Calories', t.kcal, 'numeric', 'kcal')}${f('s-p', 'Protein', t.protein, 'numeric', 'g')}${f('s-c', 'Carbs', t.carbs, 'numeric', 'g')}${f('s-f', 'Fat', t.fat, 'numeric', 'g')}
+        ${f('s-creat', 'Creatine', p.creatine || 5, 'decimal', 'g')}
+      </div><button class="sg-link" data-act="calc-targets">${icon('spark')} Calculate from my profile</button>
+      <p class="sg-note">Macros add up to ${calc} kcal. Starting values — the coach suggests small changes from your real weight trend.</p></section>
+
+      <section class="sg"><h3>Training split</h3>
+        <div class="glass sg-card split-now"><b>${esc(split)}</b><span>${pr.rotation.map((d) => esc(dayLabel(d))).join(' → ')}</span>
+          <button class="sg-btn" data-act="open-program">${icon('edit')} Edit days & exercises</button></div>
+        <div class="split-list">${Object.entries(SPLITS).map(([k, sp]) => `<button class="glass split-opt ${pr.split === k || (!pr.split && k === 'ppl') ? 'on' : ''}" data-act="pick-split" data-v="${k}"><b>${esc(sp.name)}</b><span>${esc(sp.desc)}</span></button>`).join('')}</div>
+        <p class="sg-note">Switching split keeps all your history. You can then rename days, add your own exercises and change sets and reps.</p></section>
+
+      <section class="sg"><h3>Schedule</h3><div class="glass sg-card">
+        <div class="sf col"><span>Sessions per week</span><div class="pills">${[1, 2, 3, 4, 5, 6, 7].map((n) => `<button class="${(pr.perWeek || 3) === n ? 'on' : ''}" data-act="set-perweek" data-v="${n}">${n}</button>`).join('')}</div></div>
+        <div class="sf col"><span>Training days</span><div class="pills wd">${[1, 2, 3, 4, 5, 6, 0].map((d) => `<button class="${pr.trainingDays.includes(d) ? 'on' : ''}" data-act="toggle-wd" data-v="${d}">${dayName(d).slice(0, 1)}</button>`).join('')}</div></div>
+      </div><p class="sg-note">Missed a day? The next workout moves to your next free day — nothing is skipped.</p></section>
+
+      <section class="sg"><h3>App</h3><div class="glass sg-card">
+        <label class="sf"><span>Rest timer</span><div class="sf-in"><input type="checkbox" class="switch" id="s-rest" ${S.settings.restTimer ? 'checked' : ''}></div></label>
+        <label class="sf"><span>Progress check-in</span><div class="sf-in"><select id="s-interval"><option value="7" ${S.settings.checkInterval == 7 ? 'selected' : ''}>Every week</option><option value="15" ${S.settings.checkInterval == 15 ? 'selected' : ''}>Every 2 weeks</option></select></div></label>
+        <label class="sf"><span>Appearance</span><div class="sf-in"><select id="s-theme">${[['dark', 'Dark'], ['light', 'Light'], ['system', 'Automatic']].map(([v, l]) => `<option value="${v}" ${S.settings.theme === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div></label>
+      </div></section>
+
+      <section class="sg"><h3>Data</h3><div class="glass sg-card actions">
+        <button data-act="backup">Back up everything</button>
+        <label>Restore a backup<input type="file" accept="application/json,.json" data-in="import-file" hidden></label>
+        <button data-act="open-refs">The science behind the advice</button>
+        <button class="danger-text" data-act="reset-all">Erase all data</button>
+      </div><p class="sg-note">Everything stays on this phone.${S.state.lastBackup ? ` Last backup ${fmtShort(S.state.lastBackup)}.` : ' Back up every few weeks to Files or iCloud Drive.'} <span id="storage-info"></span></p>
+      <p class="sg-note center-text">Coach v${APP_VERSION}</p></section>
+      <div class="spacer"></div>
     </div>`;
 }
 
-async function saveSettings() {
+// Copy what's typed in Settings into the state (used before re-rendering, and on Save).
+function readSettingsForm() {
+  if (!$('#s-name')) return;
   const n = (id) => { const x = parseFloat(($(`#${id}`)?.value || '').replace(',', '.')); return Number.isFinite(x) ? x : null; };
-  Object.assign(S.profile, { name: $('#s-name').value.trim(), age: n('s-age'), height: n('s-height'), startWeight: n('s-start') || S.profile.startWeight, targetWeight: n('s-target') || S.profile.targetWeight, planMonths: n('s-months') || 8, creatine: n('s-creat') || 5 });
+  Object.assign(S.profile, { name: $('#s-name').value.trim(), sex: $('#s-sex').value, age: n('s-age'), height: n('s-height'), startWeight: n('s-start') || S.profile.startWeight, targetWeight: n('s-target') || S.profile.targetWeight, planMonths: n('s-months') || 8, creatine: n('s-creat') || 5 });
   Object.assign(S.targets, { kcal: n('s-kcal') || S.targets.kcal, protein: n('s-p') ?? S.targets.protein, carbs: n('s-c') ?? S.targets.carbs, fat: n('s-f') ?? S.targets.fat });
   Object.assign(S.settings, { restTimer: $('#s-rest').checked, checkInterval: +$('#s-interval').value, theme: $('#s-theme').value });
   if ($('#s-startdate').value) S.state.startDate = $('#s-startdate').value;
+}
+
+async function saveSettings() {
+  readSettingsForm();
   await Promise.all(['profile', 'targets', 'settings', 'state', 'program'].map(saveKV));
   closeSheet(); toast('Saved');
 }
 
+// Keep an in-progress workout consistent when the programme's days change.
+async function settleActiveFor(program) {
+  if (S.active && !program.days[S.active.dayId]) {
+    if (S.active.exercises.some((e) => e.saved)) { S.active.exercises.forEach((e) => { if (!e.saved) e.skipped = true; }); await commitWorkout(); }
+    else { S.active = null; await db.kvSet('active', null); }
+  }
+  if (UI.trainDay && !program.days[UI.trainDay]) UI.trainDay = null;
+}
+
 function viewProgram() {
+  const rot = S.program.rotation;
+  if (!S.program.days[UI.editDay]) UI.editDay = rot[0];
   const id = UI.editDay;
   const day = S.program.days[id];
-  return `<div class="sheet-head"><button class="icon-btn" data-act="close-sheet">${icon('x')}</button><div class="center"><b>Programme</b></div><span></span></div>
-    <div class="sheet-body">
-      <div class="seg wide">${S.program.rotation.map((d) => `<button class="${d === id ? 'on' : ''}" data-act="edit-day" data-v="${d}">${esc(dayLabel(d))}</button>`).join('')}</div>
-      <p class="muted tiny">Edits apply from the next workout. History is kept for every exercise, even removed ones.</p>
-      ${day.exercises.map((e, i) => `<div class="prog-ex"><div class="prog-top"><input value="${esc(e.name)}" data-in="pe-name" data-i="${i}" class="name-input">
-          <button class="icon-btn sm" data-act="pe-move" data-i="${i}" data-v="-1" ${i ? '' : 'disabled'}>${icon('up')}</button>
-          <button class="icon-btn sm" data-act="pe-move" data-i="${i}" data-v="1" ${i < day.exercises.length - 1 ? '' : 'disabled'}>${icon('down')}</button>
-          <button class="icon-btn sm" data-act="pe-remove" data-i="${i}">${icon('trash')}</button></div>
+  const k = rot.indexOf(id);
+  return `<div class="sheet-head"><button class="glass-btn" data-act="close-sheet" aria-label="Close">${icon('down')}</button><div class="center"><b>Your split</b><span>${rot.length} day${rot.length > 1 ? 's' : ''} in rotation</span></div><span></span></div>
+    <div class="sheet-body settings">
+      <div class="day-tabs">${rot.map((d) => `<button class="${d === id ? 'on' : ''}" data-act="edit-day" data-v="${d}">${esc(dayLabel(d))}</button>`).join('')}<button class="add" data-act="pe-add-day" aria-label="Add a day">${icon('plus')}</button></div>
+      <div class="glass sg-card">
+        <label class="sf"><span>Day name</span><div class="sf-in"><input value="${esc(day.name)}" data-in="pe-day-name" autocomplete="off"></div></label>
+        <label class="sf"><span>Warm-up</span><div class="sf-in"><input value="${esc(day.warmup.join(' · '))}" data-in="pe-warmup" autocomplete="off"></div></label>
+        <label class="sf"><span>Finisher</span><div class="sf-in"><input value="${esc(day.finisher)}" data-in="pe-finisher" autocomplete="off"></div></label>
+        <div class="day-actions"><button data-act="pe-day-move" data-v="-1" ${k ? '' : 'disabled'}>${icon('back')} Earlier</button><button data-act="pe-day-move" data-v="1" ${k < rot.length - 1 ? '' : 'disabled'}>Later ${icon('chev')}</button><button class="danger-text" data-act="pe-day-del">${icon('trash')} Delete day</button></div>
+      </div>
+      <h3 class="sg-h">Exercises</h3>
+      ${day.exercises.length ? day.exercises.map((e, i) => `<div class="glass prog-ex"><div class="prog-top"><span class="pe-n">${i + 1}</span><input value="${esc(e.name)}" data-in="pe-name" data-i="${i}" class="name-input" autocomplete="off">
+          <button class="icon-btn sm" data-act="pe-move" data-i="${i}" data-v="-1" ${i ? '' : 'disabled'} aria-label="Move up">${icon('up')}</button>
+          <button class="icon-btn sm" data-act="pe-move" data-i="${i}" data-v="1" ${i < day.exercises.length - 1 ? '' : 'disabled'} aria-label="Move down">${icon('down')}</button>
+          <button class="icon-btn sm" data-act="pe-remove" data-i="${i}" aria-label="Remove">${icon('trash')}</button></div>
         <div class="prog-grid">
-          <label><span>Sets</span><input value="${e.sets.join('-')}" data-in="pe-sets" data-i="${i}" inputmode="text"></label>
-          <label><span>Reps</span><input value="${e.reps[0] === e.reps[1] ? e.reps[0] : e.reps.join('-')}" data-in="pe-reps" data-i="${i}" inputmode="text"></label>
+          <label><span>Sets</span><input value="${e.sets.join('-')}" data-in="pe-sets" data-i="${i}"></label>
+          <label><span>Reps</span><input value="${e.reps[0] === e.reps[1] ? e.reps[0] : e.reps.join('-')}" data-in="pe-reps" data-i="${i}"></label>
           <label><span>Step kg</span><input value="${e.inc}" data-in="pe-inc" data-i="${i}" inputmode="decimal"></label>
           <label><span>Rest s</span><input value="${e.rest}" data-in="pe-rest" data-i="${i}" inputmode="numeric"></label>
-          <label class="span2"><span>Equipment</span><select data-in="pe-equip" data-i="${i}">${Object.entries(EQUIP).map(([k, v]) => `<option value="${k}" ${k === e.equip ? 'selected' : ''}>${v.label} (${v.unit})</option>`).join('')}</select></label>
-        </div></div>`).join('')}
-      <button class="btn ghost block" data-act="pe-add">${icon('plus')} Add exercise</button>
-      <div class="grid2"><label class="field"><span>Warm-up</span><input value="${esc(day.warmup.join(' | '))}" data-in="pe-warmup"></label><label class="field"><span>Finisher</span><input value="${esc(day.finisher)}" data-in="pe-finisher"></label></div>
-      <button class="link" data-act="pe-reset">Restore the original programme</button>
+          <label class="span2"><span>Equipment</span><select data-in="pe-equip" data-i="${i}">${Object.entries(EQUIP).map(([kk, v]) => `<option value="${kk}" ${kk === e.equip ? 'selected' : ''}>${v.label}</option>`).join('')}</select></label>
+          <label class="span2"><span>Main muscle</span><select data-in="pe-muscle" data-i="${i}"><option value="">—</option>${MUSCLES.map((m) => `<option value="${m}" ${e.muscles?.[0] === m ? 'selected' : ''}>${m[0].toUpperCase() + m.slice(1)}</option>`).join('')}</select></label>
+        </div></div>`).join('') : '<p class="empty-note">No exercises yet — add your first one.</p>'}
+      <button class="glass-cta ghost" data-act="pe-add">${icon('plus')} Add exercise</button>
+      <p class="sg-note">Changes apply from the next workout. Every exercise keeps its history, even if you remove it.</p>
       <div class="spacer"></div></div>`;
 }
 
@@ -1180,7 +1237,7 @@ const actions = {
   'open-settings': () => openSheet('settings', { full: true }),
   'open-coach': () => openSheet('coach', { full: true }),
   'open-refs': () => openSheet('refs', { full: true }),
-  'open-program': () => openSheet('program', { full: true }),
+  'open-program': () => { readSettingsForm(); openSheet('program', { full: true }); },
   'open-checkin': () => { UI.ciWeight = ''; openSheet('checkin', { full: true }); },
   'open-compare': (el) => openSheet('compare', { full: true, b: el.dataset.b }),
   'open-exercise': (el) => openSheet('exercise', { full: true, id: el.dataset.id }),
@@ -1249,6 +1306,41 @@ const actions = {
   // settings
   'save-settings': () => saveSettings(),
   'toggle-wd': (el) => { const v = +el.dataset.v; const t = S.program.trainingDays; S.program.trainingDays = t.includes(v) ? t.filter((x) => x !== v) : [...t, v].sort(); el.classList.toggle('on'); },
+  'set-perweek': (el) => { S.program.perWeek = +el.dataset.v; el.parentElement.querySelectorAll('button').forEach((b) => b.classList.toggle('on', b === el)); },
+  'calc-targets': () => {
+    readSettingsForm();
+    const t = suggestTargets({ weight: currentWeight(S.body, S.profile.startWeight), height: S.profile.height, age: S.profile.age, sex: S.profile.sex, targetWeight: S.profile.targetWeight });
+    if (!t) return toast('Add your age, height and weight first.');
+    [['s-kcal', t.kcal], ['s-p', t.protein], ['s-c', t.carbs], ['s-f', t.fat]].forEach(([id, v]) => { $(`#${id}`).value = v; });
+    toast('Calculated — tap Save to keep them');
+  },
+  'pick-split': async (el) => {
+    const sp = SPLITS[el.dataset.v];
+    if (!confirm(`Switch to ${sp.name}? All your history is kept.`)) return;
+    readSettingsForm();
+    const next = applySplit(S.program, el.dataset.v);
+    await settleActiveFor(next);
+    S.program = next; UI.editDay = next.rotation[0];
+    await saveKV('program'); renderSheet(); toast(`${sp.name} ready`);
+  },
+  'pe-add-day': async () => {
+    const name = prompt('Name of the new day (e.g. Upper, Arms, Full body)'); if (!name?.trim()) return;
+    const id = 'd_' + uid();
+    S.program.days[id] = { name: name.trim(), warmup: ['Warm-up · 5–10 min', 'Mobility & core activation'], finisher: 'Cardio · 10 min', exercises: [] };
+    S.program.rotation.push(id); S.program.split = 'custom'; UI.editDay = id;
+    await saveKV('program'); renderSheet();
+  },
+  'pe-day-move': async (el) => { const r = S.program.rotation; const i = r.indexOf(UI.editDay), j = i + +el.dataset.v; if (j < 0 || j >= r.length) return; [r[i], r[j]] = [r[j], r[i]]; S.program.split = 'custom'; await saveKV('program'); renderSheet(); },
+  'pe-day-del': async () => {
+    const r = S.program.rotation; const id = UI.editDay;
+    if (r.length === 1) return toast('Keep at least one day.');
+    if (!confirm(`Delete ${dayLabel(id)}? Its exercises keep their history.`)) return;
+    const next = { ...S.program, rotation: r.filter((d) => d !== id), days: { ...S.program.days }, archived: [...(S.program.archived || []), ...S.program.days[id].exercises], split: 'custom' };
+    delete next.days[id];
+    await settleActiveFor(next);
+    S.program = next; UI.editDay = next.rotation[0];
+    await saveKV('program'); renderSheet();
+  },
   'backup': async () => {
     toast('Preparing backup…');
     const data = await exportAll();
@@ -1316,8 +1408,10 @@ const inputs = {
   'pe-inc': (el) => { const v = parseFloat(el.value.replace(',', '.')); if (v >= 0) { S.program.days[UI.editDay].exercises[+el.dataset.i].inc = v; saveKV('program'); } },
   'pe-rest': (el) => { const v = parseInt(el.value, 10); if (v >= 0) { S.program.days[UI.editDay].exercises[+el.dataset.i].rest = v; saveKV('program'); } },
   'pe-equip': (el) => { const e = S.program.days[UI.editDay].exercises[+el.dataset.i]; e.equip = el.value; e.inc = EQUIP[el.value].inc; saveKV('program'); renderSheet(); },
-  'pe-warmup': (el) => { S.program.days[UI.editDay].warmup = el.value.split('|').map((s) => s.trim()).filter(Boolean); saveKV('program'); },
+  'pe-warmup': (el) => { S.program.days[UI.editDay].warmup = el.value.split(/[|·]/).map((s) => s.trim()).filter(Boolean); saveKV('program'); },
   'pe-finisher': (el) => { S.program.days[UI.editDay].finisher = el.value; saveKV('program'); },
+  'pe-day-name': (el) => { S.program.days[UI.editDay].name = el.value || 'Day'; saveKV('program'); },
+  'pe-muscle': (el) => { const e = S.program.days[UI.editDay].exercises[+el.dataset.i]; e.muscles = el.value ? [el.value, ...(e.muscles || []).filter((m) => m !== el.value)] : []; saveKV('program'); },
 };
 const changes = {
   'quick-photo': async (el) => {

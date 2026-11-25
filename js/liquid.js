@@ -103,7 +103,7 @@ export function createLiquid(bar, opts) {
   const drop = document.createElement('span');
   drop.className = 'lq-drop'; drop.setAttribute('aria-hidden', 'true');
   bar.prepend(drop); bar.prepend(canvas);
-  s.glc = initGL(canvas);
+  s.glc = opts.simple ? null : initGL(canvas); // simple: same motion, flat slider instead of water
   bar.dataset.gl = s.glc ? 'on' : 'off';
   const lost = (e) => { e.preventDefault(); s.glc = null; bar.dataset.gl = 'off'; };
   canvas.addEventListener('webglcontextlost', lost);

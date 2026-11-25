@@ -487,3 +487,16 @@ export function nutritionHistory(food, targets, today, days = 30) {
     reached: nutritionVerdict(d, targets, true).status === 'done',
   }));
 }
+
+// Starting targets for a new person (Mifflin-St Jeor × moderate activity), adjusted for the goal.
+// Protein ~2 g/kg, fat ~0.9 g/kg, the rest carbs. Always editable; the coach adjusts from real data.
+export function suggestTargets({ weight, height, age, sex = 'male', targetWeight }) {
+  if (!(weight > 30) || !(height > 100) || !(age > 10)) return null;
+  const bmr = 10 * weight + 6.25 * height - 5 * age + (sex === 'female' ? -161 : 5);
+  const goal = targetWeight > weight + 0.5 ? 250 : targetWeight < weight - 0.5 ? -400 : 0;
+  const kcal = Math.round((bmr * 1.55 + goal) / 10) * 10;
+  const protein = Math.round(weight * 2);
+  const fat = Math.round(weight * 0.9);
+  const carbs = Math.max(0, Math.round((kcal - protein * 4 - fat * 9) / 4));
+  return { kcal, protein, carbs, fat };
+}

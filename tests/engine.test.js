@@ -391,3 +391,41 @@ test('nutrition history gives a percentage and reached flag per day', async () =
   assert.equal(h[0].date, addDays(MON, 1));
   assert.deepEqual([h[0].kcalPct, h[0].reached, h[1].kcalPct, h[1].reached], [50, false, 100, true]);
 });
+
+test('split templates are valid and switching keeps old exercises in the archive', async () => {
+  const { SPLITS, applySplit } = await import('../js/program.js');
+  for (const [k, sp] of Object.entries(SPLITS)) {
+    const pr = sp.build();
+    assert.ok(pr.rotation.length >= 1, k);
+    for (const d of pr.rotation) { assert.ok(pr.days[d], `${k}.${d}`); assert.ok(pr.days[d].exercises.length >= 3, `${k}.${d} exercises`); }
+    const ids = pr.rotation.flatMap((d) => pr.days[d].exercises.map((e) => e.id));
+    for (const d of pr.rotation) { const dIds = pr.days[d].exercises.map((e) => e.id); assert.equal(new Set(dIds).size, dIds.length, `${k}.${d} unique`); }
+    assert.ok(ids.length);
+  }
+  const ul = applySplit(cloneProgram(), 'upper_lower');
+  assert.deepEqual(ul.rotation, ['upper', 'lower']);
+  assert.equal(ul.perWeek, 4);
+  assert.ok(ul.archived.some((e) => e.id === 'db_fly'), 'removed exercise archived');
+  assert.ok(!ul.archived.some((e) => e.id === 'bench'), 'shared exercise not archived');
+  assert.ok(allExercises(ul).db_fly.archived);
+});
+
+test('suggested targets for a new person', async () => {
+  const { suggestTargets } = await import('../js/engine.js');
+  const t = suggestTargets({ weight: 74, height: 179, age: 24, sex: 'male', targetWeight: 79 });
+  assert.equal(t.protein, 148);
+  assert.ok(t.kcal > 2700 && t.kcal < 3100, `${t.kcal}`);
+  assert.ok(Math.abs(t.protein * 4 + t.carbs * 4 + t.fat * 9 - t.kcal) < 10);
+  const cut = suggestTargets({ weight: 80, height: 170, age: 30, sex: 'female', targetWeight: 70 });
+  assert.ok(cut.kcal < t.kcal);
+  assert.equal(suggestTargets({ weight: 70 }), null);
+});
+
+test('after switching split, old workout days do not break the rotation', async () => {
+  const { applySplit } = await import('../js/program.js');
+  const ul = applySplit(cloneProgram(), 'upper_lower');
+  const ws = [W(MON, 'push'), W(addDays(MON, 2), 'pull')];
+  assert.equal(nextRotation(ul, ws), 'upper');
+  const p = todayPlan(ul, ws, addDays(MON, 3), MON);
+  assert.ok(['upper', 'lower'].includes(p.dayId || p.next));
+});
