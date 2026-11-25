@@ -3,7 +3,7 @@
 import { addDays, daysBetween, weekStart, r1, avg, fmtShort, fmtLong } from './util.js';
 import {
   todayPlan, finishedWorkouts, nutritionSummary, totals, remaining, goalStatus, calorieAdvice,
-  strengthTrend, performanceDip, weeklyVolume, prsInWorkout, GAIN_BAND, suggestMeals, nutritionVerdict,
+  strengthTrend, performanceDip, weeklyVolume, exerciseHistory, prsInWorkout, GAIN_BAND, suggestMeals, nutritionVerdict,
 } from './engine.js';
 import { allExercises } from './program.js';
 import { FOODS, MEAL_TEMPLATES } from './foods.js';
@@ -153,3 +153,37 @@ export function weeklyReport(S, ws, today) {
 }
 
 export { fmtLong };
+
+// Up to 3 short, data-based focus points for the Progress page.
+export function focusAdvice(ctx) {
+  const { S, today, exMap, goal } = ctx;
+  const out = [];
+  const fin = finishedWorkouts(S.workouts);
+  const last14 = fin.filter((w) => w.date > addDays(today, -14));
+  if (!fin.length) return ['Log your first workouts and meals — personal advice appears here.'];
+  // Training balance: muscles trained least over the last 2 weeks (per-week average)
+  if (last14.length >= 2) {
+    const vol = weeklyVolume(S.workouts, exMap, addDays(today, -13), today);
+    const main = ['chest', 'back', 'shoulders', 'quads', 'hamstrings', 'biceps', 'triceps', 'glutes'];
+    const low = main.map((m) => [m, (vol[m] || 0) / 2]).filter(([, v]) => v < 8).sort((a, b) => a[1] - b[1])[0];
+    if (low) {
+      const ex = Object.values(exMap).find((e) => !e.archived && e.muscles?.[0] === low[0]);
+      out.push(`${low[0][0].toUpperCase() + low[0].slice(1)} gets the least work (${r1(low[1])} sets/week)${ex ? ` — add 1 set to ${ex.name.toLowerCase()}` : ''}.`);
+    }
+  }
+  // Stalled lifts: no progress over the last 3 sessions
+  const stuck = Object.values(exMap).filter((e) => e.equip !== 'bodyweight').map((e) => {
+    const h = exerciseHistory(S.workouts, e.id).slice(-3);
+    return h.length === 3 && h[2].best <= h[0].best ? e.name : null;
+  }).filter(Boolean);
+  if (stuck.length) out.push(`${stuck[0]} hasn’t moved in 3 sessions — keep the weight, push for 1 more rep, sleep well.`);
+  // Nutrition
+  const n = nutritionSummary(S.food, S.targets, addDays(today, -7), addDays(today, -1));
+  if (n.logged >= 3 && n.proteinHit < n.logged * 0.7) out.push(`Protein: reach ${S.targets.protein} g on more days (${n.proteinHit}/${n.logged} last week).`);
+  else if (n.logged < 3) out.push('Log your meals every day so I can check your food.');
+  // Weight trend
+  if (goal.rate != null && goal.rate < GAIN_BAND.lo && out.length < 3) out.push('Weight is moving slowly — eat your full calorie target every day.');
+  if (goal.rate != null && goal.rate > GAIN_BAND.hi && out.length < 3) out.push('Weight is rising fast — stay at your calorie target, no extra.');
+  if (!out.length) out.push('Everything is on track. Keep adding a rep or a little weight each week.');
+  return out.slice(0, 3);
+}

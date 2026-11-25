@@ -356,3 +356,14 @@ test('nutrition verdict answers "did I reach my goal?"', async () => {
   assert.equal(nutritionVerdict({ k: 3000, p: 170 }, T, true).status, 'over');
   assert.deepEqual([macroStatus(50, 100), macroStatus(100, 100), macroStatus(130, 100)], ['low', 'ok', 'high']);
 });
+
+test('focus advice is short, data-based and never empty', async () => {
+  const { focusAdvice } = await import('../js/coach.js');
+  const S = { profile, targets, program: P, settings: {}, state: { startDate: MON }, workouts: [], food: [], body: [], photos: [], customFoods: [], meals: [], days: {} };
+  assert.match(focusAdvice(buildContext(S, MON))[0], /first workouts/);
+  const today = addDays(MON, 13);
+  S.workouts = [0, 7].map((d) => W(addDays(MON, d), 'push', [E('bench', [[60, 12], [60, 12], [60, 12]])]));
+  const adv = focusAdvice(buildContext(S, today));
+  assert.ok(adv.length >= 1 && adv.length <= 3);
+  assert.ok(adv.some((a) => /least work/.test(a)), adv.join(' | '));
+});
